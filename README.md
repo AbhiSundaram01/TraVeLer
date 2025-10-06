@@ -1,4 +1,4 @@
-# 🧠 TraVeLer: Trajectory-Embedded Vector Field Learning
+# 🧠 TraVeLer: Trajectory and Vector Field Learning
 
 TraVeLer is a project that jointly trains two neural networks:
 - A **Vector Field Network** (`vf`) that models directional dynamics over the data manifold.
