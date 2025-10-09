@@ -1,0 +1,58 @@
+# Core (choose appropriate torch wheel for your CUDA/pip environment)
+torch>=1.13.1
+torchvision>=0.14.1
+torchaudio>=0.13.1
+
+# PyG (torch-geometric) - see https://pytorch-geometric.readthedocs.io for exact wheel matching
+torch-geometric>=2.2.0
+# NOTE: torch-geometric has binary extensions (torch-scatter, torch-sparse, etc.).
+# Follow the install instructions at https://pytorch-geometric.readthedocs.io/en/latest/notes/installation.html
+
+# Graph libraries
+dgl>=0.9.1
+networkx>=2.8
+
+# Scientific / plotting
+numpy>=1.23
+scipy>=1.9
+matplotlib>=3.5
+seaborn>=0.12
+pandas>=1.4
+
+# Machine learning utilities
+scikit-learn>=1.1
+pytorch-lightning>=1.7
+torchmetrics>=0.7
+
+# Single-cell / bio packages used in dataset preprocessing
+scanpy>=1.9
+scvelo>=0.2
+
+# Topological / TDA packages (optional)
+ripser>=0.6
+persim>=0.9
+gudhi>=3.5
+
+# Image / IO
+Pillow>=9.0
+requests>=2.28
+
+# Utilities used in analyses / plotting
+python-dateutil
+
+# Testing / dev
+pytest>=7.0
+
+# Optional / advanced: functorch may be required for some code paths
+functorch
+
+# Notes:
+# - The project depends on PyTorch and several binary packages (DGL, torch-geometric and their
+#   companion packages). For reproducible installs, pick a specific PyTorch wheel that matches
+#   your CUDA version (or use CPU-only) and then install the matching torch-geometric wheels.
+# - Example install sequence (replace <cuda> with your CUDA tag or cpu):
+#   pip install "torch==1.13.1+cu117" "torchvision==0.14.1+cu117" -f https://download.pytorch.org/whl/torch_stable.html
+#   # Then follow PyG install guide to install torch-scatter/torch-sparse/torch-cluster/torch-spline-conv
+#   pip install torch-geometric
+# - If you plan to use DGL with CUDA, install the corresponding DGL wheel from https://www.dgl.ai/pages/start.html
+# - For full reproducibility consider creating and saving an environment.yml (conda) or pip freeze output after install.

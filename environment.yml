@@ -1,0 +1,67 @@
+name: traveler
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  # Core scientific / plotting libs (installed via conda where possible)
+  - numpy=1.23
+  - scipy=1.9
+  - matplotlib=3.5
+  - seaborn=0.12
+  - pandas=1.4
+  - scikit-learn=1.1
+  - networkx=2.8
+  - pillow=9.0
+  - requests=2.28
+  - pytest=7.0
+
+  # Use pip to install PyTorch and the binary graph packages to ensure wheel compatibility
+  - pip:
+    # CPU-only PyTorch wheel (example). If you want GPU/CUDA, replace with the matching wheel.
+    - torch==1.13.1+cpu
+    - torchvision==0.14.1+cpu
+    - torchaudio==0.13.1
+
+    # PyG companion packages (must match torch wheel). These versions are examples —
+    # if you change torch version, pick the corresponding torch-scatter/torch-sparse wheels
+    - torch-scatter==2.1.1
+    - torch-sparse==0.6.17
+    - torch-cluster==1.6.0
+    - torch-spline-conv==1.2.1
+    - torch-geometric==2.2.0
+
+    # DGL (CPU wheel). For CUDA-enabled DGL, install the appropriate wheel from DGL docs.
+    - dgl==0.9.1
+
+    # Other ML / utilities
+    - pytorch-lightning==1.7.7
+    - torchmetrics==0.7.0
+    - functorch
+
+    # Single-cell / bio packages
+    - scanpy==1.9.1
+    - scvelo==0.2.5
+
+    # Topological data analysis (optional)
+    - ripser==0.6
+    - persim==0.9
+    - gudhi==3.5
+
+    # Misc
+    - python-dateutil
+
+# Notes:
+# - The pip-installed wheels above (torch, torchvision, torch-scatter, torch-sparse, etc.)
+#   must match the underlying Python and platform. For CPU-only installs this file should
+#   work when creating the conda env. For CUDA/GPU you must replace the torch wheels with
+#   the correct +cuXXX variants and ensure companion PyG wheels are compatible.
+# - After creating the environment, it's a good practice to run:
+#     conda activate traveler
+#     pip check
+#     python -c "import torch, torch_geometric, dgl, scanpy, networkx; print('ok')"
+# - If pip fails to find binary wheels for the torch-geometric companions, follow the
+#   official PyG installation guide: https://pytorch-geometric.readthedocs.io/en/latest/notes/installation.html
+# - For DGL, use https://www.dgl.ai/pages/start.html when selecting CUDA-enabled wheels.

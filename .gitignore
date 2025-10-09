@@ -168,4 +168,7 @@ vector_field_visualizations/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+
+# VS Code workspace settings
+.vscode/
 Thumbs.db
