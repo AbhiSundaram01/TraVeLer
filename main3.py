@@ -7,6 +7,7 @@ import os
 import logging
 from datetime import datetime
 from dataset import preprocess_pancreas_data
+os.environ['DGL_GRAPHBOLT_DISABLE'] = '1'
 from models import DiffPool
 from neural_k_forms.forms import NeuralOneForm
 from neural_k_forms.chains import generate_integration_matrix
@@ -120,7 +121,7 @@ def visualize_initial_state(model, vf, x, adj, run_dir, logger):
         logger.info("Displaying initial vector field visualization...")
         try:
             plt.figure(figsize=(15, 10))
-            plt.title("Initial Vector Field (Before Training)", fontsize=16)
+            plt.title("Initial Vector Field (Before Training)", fontsize=16)=
             
             plot_combined_vector_field_with_mst(vf, chain_initial, x_out_initial,
                                               save_to_file=False,
@@ -553,7 +554,7 @@ def main():
     # FILE_NAME = "data/pancreas.h5ad"
     # logger.info(f"Loading data from {FILE_NAME}")
     # adata_subsampled, x, adj = preprocess_pancreas_data(FILE_NAME)
-    FILE_NAME = "data/bone_marrow.h5ad"
+    FILE_NAME = "data/setty_bone_marrow.h5ad"
     logger.info(f"Loading bone marrow data from {FILE_NAME}")
 
     from dataset import preprocess_bone_marrow_data
