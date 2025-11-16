@@ -159,7 +159,7 @@ def preprocess_pancreas_data(file_path, subsample_frac=0.5, random_state=42, str
     ).squeeze(0)
 
     # Ensure the adjacency matrix is symmetric
-    adj = (adj + adj.transpose(0, 1)) / 2
+    # adj = (adj + adj.transpose(0, 1)) / 2
 
     # Convert adjacency matrix to float
     adj = adj.to(torch.float)
@@ -254,3 +254,50 @@ def preprocess_bone_marrow_data(file_path):
     print(f"Processed data: {x.shape[0]} cells, {x.shape[1]} genes")
     
     return adata_hvg, x, adj
+
+def preprocess_bone_marrow_data_subsampled(file_path):
+    """
+    Preprocess bone marrow data for analysis
+    """
+    print(f"Loading bone marrow dataset from {file_path}")
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Dataset file not found at {file_path}")
+    
+    # Load the dataset
+    adata = sc.read(file_path)
+
+    n = int(0.4 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    
+    # Apply preprocessing
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
+    
+    # Compute PCA and neighbors
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_pcs=10)
+    
+    # Use the highly variable genes for downstream analysis
+    adata_subsampled_hvg = adata_subsampled[:, adata_subsampled.var.highly_variable]
+    
+    # Convert to PyTorch tensors
+    x = torch.FloatTensor(adata_subsampled_hvg.X.toarray() if scipy.sparse.issparse(adata_subsampled_hvg.X) else adata_subsampled_hvg.X)
+    
+    # Get adjacency matrix from neighborhood graph
+    if 'neighbors' in adata_subsampled.uns:
+        adj = torch.FloatTensor(adata_subsampled.obsp['connectivities'].toarray())
+    else:
+        # If neighbors haven't been computed, create a simple adjacency
+        adj = torch.eye(x.shape[0])
+    
+    print(f"Processed data: {x.shape[0]} cells, {x.shape[1]} genes")
+    
+    return adata_subsampled_hvg, x, adj
+
+

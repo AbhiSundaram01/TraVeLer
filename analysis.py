@@ -19,14 +19,42 @@ def analyze_cluster_correspondence(model, x, adj, adata_subsampled):
     model.eval()
     with torch.no_grad():
         # Forward pass to extract s_0 and s_1 (cluster assignments)
-        z_0 = model.gnn1_embed(adj, x)
-        s_0 = torch.softmax(model.gnn1_pool(adj, x), dim=-1)
-        
-        x_1 = s_0.t() @ z_0
-        adj_1 = s_0.t() @ adj @ s_0
-        
-        z_1 = model.gnn2_embed(adj_1, x_1)
-        s_1 = torch.softmax(model.gnn2_pool(adj_1, x_1), dim=-1)
+
+        z_0_in = model.gnn1_embed_in(adj, x) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0_out = model.gnn1_embed_out(adj.T, x) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0 = z_0_in + z_0_out
+        s_0_out = model.gnn1_pool_out(adj, x)
+        s_0_in  = model.gnn1_pool_in(adj.T, x)
+        s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+        # s_0 = torch.softmax(model.gnn1_pool(adj, x), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
+
+        x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
+        adj_1 = s_0.t() @ adj @ s_0 # (1848, 64)' x (1848, 1848) x (1848, 64) = (64, 64)
+
+        # Row-normalize so each row sums to 1
+        adj_1 = torch.softmax(adj_1, dim=-1)
+        # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_1 = adj_1 / row_sum
+
+        z_1_in = model.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1_out = model.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1 = z_1_in + z_1_out
+        s_1_out = model.gnn2_pool_out(adj_1, x_1)
+        s_1_in  = model.gnn2_pool_in(adj_1.T, x_1)
+        s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+        # s_1 = torch.softmax(model.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
+
+        x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
+        adj_2 = s_1.t() @ adj_1 @ s_1 # (64, 8)' x (64, 64) x (64, 8) = (8, 8)
+        adj_2 = torch.softmax(adj_2, dim=-1)
+        # row_sum = adj_2.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_2 = adj_2 / row_sum
+
+        # # Remove batch dimension if we added it
+        # if unbatch_output:
+        #     x_2 = x_2.squeeze(0)
+        #     adj_2 = adj_2.squeeze(0)
+
         
         # Convert to numpy
         s_0_np = s_0.numpy()
@@ -207,7 +235,7 @@ def visualize_clusters_in_umap(adata_subsampled, final_assignments):
     plt.tight_layout()
     plt.show()
 
-def visualize_diffpool_embeddings(model, x, adj, adata_subsampled):
+def visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarchy=False):
     """
     Visualize the original data directly in the DiffPool embedding space.
     
@@ -224,7 +252,7 @@ def visualize_diffpool_embeddings(model, x, adj, adata_subsampled):
     model.eval()
     with torch.no_grad():
         # Compute embeddings for all original nodes
-        node_embeddings = model.compute_node_embeddings(x, adj)
+        node_embeddings = model.compute_node_embeddings(x, adj, full_hierarchy)
     
     # Create a single plot with better size for detailed visualization
     plt.figure(figsize=(12, 10))

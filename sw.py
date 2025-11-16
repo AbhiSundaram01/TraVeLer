@@ -42,9 +42,59 @@ def setup_experiment():
     logger.info(f"Starting training run {run_id}")
     
     return run_id, run_dir, logger
+def setup_model_undirected(x, adj, logger):
+    """Initialize models, vector field and optimizer"""
+    model = DiffPool(num_features=x.size(1), max_nodes=x.size(0))
+    
+    # # Get vector field size based on initial model output
+    # with torch.no_grad():
+    #     temp_x_out, _ = model(x, adj)
+    #     temp_chain = soft_mst_approximation2(temp_x_out, temperature=0.1)
+    #     c = temp_chain.size(0)  # number of features/columns in cochain data matrix
+    #     logger.info(f"Initializing vector field with {c} components based on sample chain")
+    c = 1
+    
+    # Initialize neural vector field
+    vf_in = nn.Sequential(
+        nn.Conv1d(1, 16, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.Conv1d(16, 32, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.Conv1d(32, 64, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(64 * 2, 128),
+        nn.ReLU(),
+        nn.Linear(128, 256),
+        nn.ReLU(),
+        nn.Linear(256, 512),
+        nn.ReLU(),
+        nn.Linear(512, 256),
+        nn.ReLU(),
+        nn.Linear(256, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 32),
+        nn.ReLU(),
+        nn.Linear(32, 16),
+        nn.ReLU(),
+        nn.Linear(16, 2 * c)
+    )
+    
+    vf = NeuralOneForm(vf_in, input_dim=None, hidden_dim=None, num_cochains=c)
+    model.reset_parameters()
+    
+    # Create joint optimizer
+    optimizer = torch.optim.Adam([
+        {'params': model.parameters(), 'lr': 0.0001, 'weight_decay': 0.001},
+        {'params': vf.parameters(), 'lr': 0.001, 'weight_decay': 0.01}
+    ])
+    
+    return model, vf, optimizer, c
 
 
-def setup_model(x, adj, logger):
+def setup_model_directed(x, adj, logger):
     """Initialize models, vector field and optimizer"""
     model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
     
@@ -253,8 +303,7 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         
         # Apply weights to the integration results
         # L = -(X_sum * weights).sum()
-        λ = 1
-        L = L_emb - λ * L_vf
+        L = L_emb -L_vf
         # L = torch.exp(L * 0.05)
         
         # Compute gradients
@@ -388,7 +437,7 @@ def plot_training_metrics(losses, grad_norms_vf, grad_norms_model, x_sums, run_d
     # Plot X_sum values
     plt.figure(figsize=(10, 6))
     x_sums_array = np.array(x_sums)
-    plt.plot(x_sums_array, label='Mean Integration')
+    plt.plot(x_sums_array.mean(axis=1), label='Mean Integration')
     
     if len(x_sums_array.shape) > 1 and x_sums_array.shape[1] > 1:
         plt.fill_between(
@@ -508,7 +557,7 @@ def analyze_clusters(model, x, adj, adata_subsampled, run_dir, logger):
             logger.info(f"Cluster correspondence metrics - ARI: {ari:.4f}, NMI: {nmi:.4f}")
             
             # Visualize the embeddings directly - full hierarchy
-            fig = visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarchy=True)
+            fig = visualize_diffpool_embeddings(model, x, adj, adata_subsampled)
             embedding_viz_path = f"{run_dir}/diffpool_embeddings_full.svg"
             fig.savefig(embedding_viz_path)
             plt.close(fig)
@@ -589,35 +638,77 @@ def main():
 
     # from dataset import preprocess_bone_marrow_data, preprocess_bone_marrow_data_subsampled
     # adata_subsampled, x, adj = preprocess_bone_marrow_data_subsampled(FILE_NAME)
+    n = 1000
+    d = 200
+
+    # --- Create adjacency matrix (vectorized) ---
+    adj = (torch.rand(n, n) < 0.1).float()
+    adj.fill_diagonal_(0)  # no self-loops
+
+    # --- Original node features ---
+    x = torch.randn(n, d, dtype=torch.float32)
 
     # Setup model, vector field and optimizer
-    model, vf, optimizer, c = setup_model(x, adj, logger)
-    
-    # Visualize initial state
-    visualize_initial_state(model, vf, x, adj, run_dir, logger)
+    model_undirected, vf, optimizer, c = setup_model_undirected(x, adj, logger)
     
     # Train model
-    epochs = 50
+    epochs = 10
     losses, grad_norms_vf, grad_norms_model, x_sums = train_model(
-        model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir, logger)
+        model_undirected, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir, logger)
     
-    # Plot training metrics
-    plot_training_metrics(losses, grad_norms_vf, grad_norms_model, x_sums, run_dir, logger)
+    # Setup model, vector field and optimizer
+    model_directed, vf, optimizer, c = setup_model_directed(x, adj, logger)
     
-    # Visualize final model
-    x_out_final, chain_final = visualize_final_model2(model, vf, x, adj, run_dir, logger)
-    
-    # Analyze cluster correspondence
-    analyze_clusters(model, x, adj, adata_subsampled, run_dir, logger)
-    
-    # Create embedding animations
-    checkpoint_dir = f"{run_dir}/embedding_checkpoints"
-    create_embedding_animation(checkpoint_dir, run_dir, logger)
+    # Train model
+    epochs = 10
+    losses, grad_norms_vf, grad_norms_model, x_sums = train_model(
+        model_directed, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir, logger)
 
-    fig1 = visualize_joint_embeddings(model, x, adj, adata_subsampled, full_hierarchy=False)
-    fig1.savefig(f"{run_dir}/joint_embeddings_intermediate.png", dpi=300)
-    
-    logger.info(f"Training completed. Results saved to {run_dir}")
+    # --- Parameters ---
+    n = x.shape[0]       # number of nodes
+    d = x.shape[1]     # node features
+    probabilities = np.linspace(0, 1, 10)   # fraction of edges that are symmetric
+
+    directeds = []
+    nondirecteds = [] 
+    for p in probabilities:
+        print(p)
+        directed_list = []
+        nondirected_list = []
+        for k in range(10):
+            # --- Create adjacency matrix (vectorized) ---
+            adj = (torch.rand(n, n) < p).float()
+            adj.fill_diagonal_(0)  # no self-loops
+            # --- Original node features ---
+            y = torch.randn(n, d, dtype=torch.float32)
+            _, adj_undirected = model_undirected(y, adj)
+            _, adj_directed = model_directed(y, adj)
+            directed_list.append(torch.abs(adj_directed - adj_directed.T).mean().item())
+            nondirected_list.append(torch.abs(adj_undirected - adj_undirected.T).mean().item())
+
+        directed_list =np.array(directed_list)
+        nondirected_list =np.array(nondirected_list)
+        directeds.append(directed_list.mean())
+        nondirecteds.append(nondirected_list.mean())
+
+    plt.figure(figsize=(6, 4))
+
+    # Plot DirectedDiffPool
+    plt.plot(probabilities, directeds, marker='o', label='DirectedDiffPool')
+
+    # Plot DiffPool
+    plt.plot(probabilities, nondirecteds, marker='s', label='DiffPool')
+
+    plt.xlabel("probability of any input edge = 1")
+    plt.ylabel("Output adjacency assymmetry (mean |A-A^T|)")
+    plt.title("Directionality preservation analysis on random Graphs")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("directionality_preservation_12_11_25.png", dpi=300, bbox_inches='tight')
+
+
+
+
 
 def download_bone_marrow_dataset():
     DATA_DIR = Path("data")

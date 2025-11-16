@@ -2,6 +2,8 @@ import torch
 from torch_geometric.utils import dense_to_sparse
 import networkx as nx
 import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.cluster import KMeans
 
 def extract_coarsened_graphs(model, loader, device):
     model.eval()
@@ -294,3 +296,104 @@ def weighted_edge_chain(x_out, max_edges=100):
         chain[idx, 1] = x_out[j]
         
     return chain
+
+# Abhi
+def match_chain_lengths(chain_coords, chain):
+    """Function to subsample the coarsened chain so that it has the same 
+    number of edges as the original chain, thus allowing element wise comparison
+    of the two integration matrices in the structural preservation loss term"""
+
+    n = chain_coords.shape[0]
+    m = chain.shape[0]
+
+    q = n // m #How many subdivisions are needed of each pair in chain
+    r = n % m # how many extra subdivisions are needed
+
+    coords = []
+
+    for i in range(m):
+        start = chain[i][0]
+        end = chain[i][1]
+        n_subdiv = q + (1 if i < r else 0)
+        steps = torch.linspace(0, 1, n_subdiv + 1, device=chain.device, dtype=chain.dtype)
+
+        for s in range(n_subdiv):
+            p1 = start + (end - start) * steps[s]
+            p2 = start + (end - start) * steps[s + 1]
+            coords.append(torch.stack([p1, p2]))
+
+    coords = torch.stack(coords)   # keep everything as tensors
+    return coords
+
+def get_all_edges(x_out, adj_out):
+    edge_list = []
+    for i in range(adj_out.shape[0]):
+        for j in range(i+1, adj_out.shape[0]):  # Only upper triangle to avoid duplicates
+            edge_list.append((i, j))
+    
+    chain = torch.zeros((len(edge_list), 2, x_out.shape[1]), device=x_out.device)
+    for idx, (i, j) in enumerate(edge_list):
+        chain[idx, 0] = x_out[i]
+        chain[idx, 1] = x_out[j]
+
+    weights = torch.zeros(len(edge_list), device=x_out.device) 
+    for idx, (i, j) in enumerate(edge_list):
+        weights[idx] = adj_out[i][j]
+    return chain, weights
+
+def cluster_spring_layout(x_original, num_coarse_nodes, device='cpu', dtype=torch.float32):
+    """
+    Cluster 2D node coordinates from a spring layout into num_coarse_nodes clusters.
+
+    Parameters
+    ----------
+    x_original : np.ndarray, shape [N, 2]
+        2D coordinates of original nodes (from spring layout)
+    num_coarse_nodes : int
+        Number of clusters (same as number of coarsened nodes)
+    device : str or torch.device
+        Device for output tensor
+    dtype : torch.dtype
+        Data type for output tensor
+
+    Returns
+    -------
+    cluster_centers : torch.Tensor, shape [num_coarse_nodes, 2]
+        2D coordinates of cluster centers
+    """
+    # Run k-means
+    kmeans = KMeans(n_clusters=num_coarse_nodes, random_state=42)
+    kmeans.fit(x_original)
+
+    centers = kmeans.cluster_centers_  # [num_coarse_nodes, 2]
+
+    # Convert to torch tensors
+    cluster_centers = torch.tensor(centers, dtype=dtype, device=device)
+
+    return cluster_centers
+
+def OT_graph_similarity(x_out, node_embeddings, P, epsilon=0.01, n_iters=50):
+    """
+    Numerically stable Sinkhorn alignment loss between coarsened nodes
+    and target cluster centers.
+
+    Parameters
+    ----------
+    x_out : torch.Tensor [M, d]
+        Coarsened node embeddings
+    node_embeddings : torch.Tensor [N, d]
+        Origina node positions 
+    P: transport plan from original cells to coarsened nodes
+
+    Returns
+    -------
+    loss : torch.Tensor (scalar)
+        Differentiable alignment loss
+   
+    """
+    N = x_out.shape[0]
+    # 1. Compute pairwise squared distances (cost matrix)
+    C = torch.cdist(node_embeddings, x_out, p=2) ** 2
+    # 2. Compute alignment loss
+    
+    return torch.sum(P * C) / N**2

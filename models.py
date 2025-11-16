@@ -50,12 +50,18 @@ class DiffPool(torch.nn.Module):
 
         x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
         adj_1 = s_0.t() @ adj_0 @ s_0 # (1848, 64)' x (1848, 1848) x (1848, 64) = (64, 64)
+        adj_1 = torch.softmax(adj_1, dim=-1)
+        # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_1 = adj_1 / row_sum
 
         z_1 = self.gnn2_embed(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
 
         x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
         adj_2 = s_1.t() @ adj_1 @ s_1 # (64, 8)' x (64, 64) x (64, 8) = (8, 8)
+        adj_2 = torch.softmax(adj_2, dim=-1)
+        # row_sum = adj_2.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_2 = adj_2 / row_sum
 
         # # Remove batch dimension if we added it
         # if unbatch_output:
@@ -63,6 +69,20 @@ class DiffPool(torch.nn.Module):
         #     adj_2 = adj_2.squeeze(0)
 
         return x_2, adj_2
+    
+    def cluster_matrix(self, x_0, adj_0):
+        z_0 = self.gnn1_embed(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
+
+        x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
+        adj_1 = s_0.t() @ adj_0 @ s_0 # (1848, 64)' x (1848, 1848) x (1848, 64) = (64, 64)
+        adj_1 = torch.softmax(adj_1, dim=-1)
+        # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_1 = adj_1 / row_sum
+
+        z_1 = self.gnn2_embed(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
+        return torch.softmax(s_0 @ s_1, dim=-1)
     
     def compute_node_embeddings(self, x_0, adj_0, full_hierarchy=False):
         """
@@ -86,6 +106,9 @@ class DiffPool(torch.nn.Module):
             # Intermediate representations
             x_1 = s_0.t() @ z_0  # (num_clusters_1, hidden_dim)
             adj_1 = s_0.t() @ adj_0 @ s_0  # (num_clusters_1, num_clusters_1)
+            adj_1 = torch.softmax(adj_1, dim=-1)
+            # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+            # adj_1 = adj_1 / row_sum
             
             if full_hierarchy:
                 # Second level - same as in forward
@@ -307,3 +330,202 @@ class DiffPool3(torch.nn.Module):
         x = self.lin2(x)
         
         return F.log_softmax(x, dim=-1), l1 + l2, e1 + e2, coarsened_graphs
+
+
+class DirectedDiffPool(torch.nn.Module):
+    def __init__(self, num_features, max_nodes, hidden_dim=16, output_dim=2, n_layers=2, cluster_ratio=0.06):
+        super(DirectedDiffPool, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim # 2
+        self.n_layers = n_layers
+        self.cluster_ratio = cluster_ratio
+
+        num_clusters_1 = ceil(cluster_ratio * max_nodes)
+        num_clusters_2 = ceil(cluster_ratio * cluster_ratio * max_nodes)
+        # num_clusters_1 = 64
+        # num_clusters_2 = 8
+
+        self.gnn1_embed_in = DenseSAGEConv(num_features, hidden_dim, norm=nn.BatchNorm1d(hidden_dim))
+        self.gnn1_pool_in = DenseSAGEConv(num_features, num_clusters_1, norm=nn.BatchNorm1d(num_clusters_1))
+        self.gnn1_embed_out = DenseSAGEConv(num_features, hidden_dim, norm=nn.BatchNorm1d(hidden_dim))
+        self.gnn1_pool_out = DenseSAGEConv(num_features, num_clusters_1, norm=nn.BatchNorm1d(num_clusters_1))
+
+        self.gnn2_embed_in = DenseSAGEConv(hidden_dim, output_dim, norm=nn.BatchNorm1d(output_dim))
+        self.gnn2_pool_in = DenseSAGEConv(hidden_dim, num_clusters_2, norm=nn.BatchNorm1d(num_clusters_2))
+        self.gnn2_embed_out = DenseSAGEConv(hidden_dim, output_dim, norm=nn.BatchNorm1d(output_dim))
+        self.gnn2_pool_out = DenseSAGEConv(hidden_dim, num_clusters_2, norm=nn.BatchNorm1d(num_clusters_2))
+
+        # Initialize weights
+        self.reset_parameters()
+
+        self.projection = nn.Sequential(
+            nn.Linear(output_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
+
+    def forward(self, x_0, adj_0):
+        # # Add batch dimension if not present
+        # if x_0.dim() == 2:
+        #     x_0 = x_0.unsqueeze(0)
+        #     adj_0 = adj_0.unsqueeze(0)
+        #     unbatch_output = True
+        # else:
+        #     unbatch_output = False
+
+        z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0 = z_0_in + z_0_out
+        s_0_out = self.gnn1_pool_out(adj_0, x_0)
+        s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
+        s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+        # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
+
+        x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
+        adj_1 = s_0.t() @ adj_0 @ s_0 # (1848, 64)' x (1848, 1848) x (1848, 64) = (64, 64)
+
+        # Row-normalize so each row sums to 1
+        adj_1 = torch.softmax(adj_1, dim=-1)
+        # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_1 = adj_1 / row_sum
+
+        z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1 = z_1_in + z_1_out
+        s_1_out = self.gnn2_pool_out(adj_1, x_1)
+        s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
+        s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+        # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
+
+        x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
+        adj_2 = s_1.t() @ adj_1 @ s_1 # (64, 8)' x (64, 64) x (64, 8) = (8, 8)
+        adj_2 = torch.softmax(adj_2, dim=-1)
+        # row_sum = adj_2.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_2 = adj_2 / row_sum
+
+        # # Remove batch dimension if we added it
+        # if unbatch_output:
+        #     x_2 = x_2.squeeze(0)
+        #     adj_2 = adj_2.squeeze(0)
+
+        return x_2, adj_2
+    
+    def compute_node_embeddings(self, x_0, adj_0, full_hierarchy=False):
+        """
+        Compute embeddings for each original node using the hierarchical structure.
+        
+        Args:
+            x_0: Input node features
+            adj_0: Input adjacency matrix
+            full_hierarchy: If True, project through the complete hierarchy (s_0 @ s_1 @ x_2)
+                            If False (default), use intermediate embedding (s_0 @ z_1)
+        
+        Returns:
+            node_embeddings: Tensor of shape (num_original_nodes, output_dim) containing
+                            embeddings of original nodes in the final embedding space.
+        """
+        with torch.no_grad():
+            # # First level - same as in forward
+            # z_0 = self.gnn1_embed(adj_0, x_0)  # (N, hidden_dim)
+            # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1)  # (N, num_clusters_1)
+            z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+            z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+            z_0 = z_0_in + z_0_out
+            s_0_out = self.gnn1_pool_out(adj_0, x_0)
+            s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
+            s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+            # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
+
+            # Intermediate representations
+            x_1 = s_0.t() @ z_0  # (num_clusters_1, hidden_dim)
+            adj_1 = s_0.t() @ adj_0 @ s_0  # (num_clusters_1, num_clusters_1)
+            adj_1 = torch.softmax(adj_1, dim=-1)
+            # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+            # adj_1 = adj_1 / row_sum
+
+            if full_hierarchy:
+                # # Second level - same as in forward
+                # z_1 = self.gnn2_embed(adj_1, x_1)  # (num_clusters_1, output_dim)
+                # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1)  # (num_clusters_1, num_clusters_2)
+                
+                # # Final coarsened representation
+                # x_2 = s_1.t() @ z_1  # (num_clusters_2, output_dim)
+
+                z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+                z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+                z_1 = z_1_in + z_1_out
+                s_1_out = self.gnn2_pool_out(adj_1, x_1)
+                s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
+                s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+                # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
+
+                x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
+                
+                # Map original nodes all the way to final embedding space through both hierarchical levels
+                # This directly relates each node to the final coarsened clusters
+                node_embeddings = s_0 @ s_1 @ x_2  # (N, num_clusters_2) @ (num_clusters_2, output_dim)
+            else:
+                # # Original approach - project to intermediate embedding space
+                # z_1 = self.gnn2_embed(adj_1, x_1)  # (num_clusters_1, output_dim)
+                z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+                z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+                z_1 = z_1_in + z_1_out
+                # Map original nodes to the intermediate embedding space
+                node_embeddings = s_0 @ z_1  # (N, output_dim)
+
+            node_embeddings = self.projection(node_embeddings)
+            
+            return node_embeddings
+    
+    def cluster_matrix(self, x_0, adj_0):
+        # # Add batch dimension if not present
+        # if x_0.dim() == 2:
+        #     x_0 = x_0.unsqueeze(0)
+        #     adj_0 = adj_0.unsqueeze(0)
+        #     unbatch_output = True
+        # else:
+        #     unbatch_output = False
+
+        z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
+        z_0 = z_0_in + z_0_out
+        s_0_out = self.gnn1_pool_out(adj_0, x_0)
+        s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
+        s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+        # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
+
+        x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
+        adj_1 = s_0.t() @ adj_0 @ s_0 # (1848, 64)' x (1848, 1848) x (1848, 64) = (64, 64)
+
+        # Row-normalize so each row sums to 1
+        # row_sum = adj_1.sum(dim=-1, keepdim=True).clamp(min=1e-6)  # avoid division by 0
+        # adj_1 = adj_1 / row_sum
+        adj_1 = torch.softmax(adj_1, dim=-1)
+
+        z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
+        z_1 = z_1_in + z_1_out
+        s_1_out = self.gnn2_pool_out(adj_1, x_1)
+        s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
+        s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+        # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
+
+        return torch.softmax(s_0 @ s_1, dim=-1)
+    
+    def reset_parameters(self):
+        """Initialize model weights using Xavier initialization"""
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                # Xavier initialization for linear layers
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif hasattr(m, 'fc'):  # For DenseSAGEConv layers which have fc attribute
+                # Xavier initialization for the internal linear layer
+                nn.init.xavier_uniform_(m.fc.weight)
+                if m.fc.bias is not None:
+                    nn.init.zeros_(m.fc.bias)
+        
+        # Apply initialization to all modules
+        self.apply(init_weights)
