@@ -14,7 +14,7 @@ from scipy.stats import spearmanr
 import os
 
 
-FILE_NAME = "data/setty_bone_marrow.h5ad"
+FILE_NAME = "../data/setty_bone_marrow.h5ad"
 
 adata = sc.read(
     filename=FILE_NAME,

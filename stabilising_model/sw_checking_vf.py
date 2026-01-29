@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import multiprocessing as mp
 
 
-FILE_NAME = "data/setty_bone_marrow.h5ad"
+FILE_NAME = "../data/setty_bone_marrow.h5ad"
 
 adata = sc.read(
     filename=FILE_NAME,
