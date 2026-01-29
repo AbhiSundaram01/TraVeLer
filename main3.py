@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import matplotlib
+import random
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -10,7 +11,7 @@ from dataset import preprocess_pancreas_data
 os.environ['DGL_GRAPHBOLT_DISABLE'] = '1'
 from models import DiffPool, DirectedDiffPool
 from neural_k_forms.forms import NeuralOneForm
-from neural_k_forms.chains import generate_integration_matrix
+from neural_k_forms.chains import generate_integration_matrix, get_max_integrals
 from graph_utils import create_mst_chain_from_coords, soft_mst_approximation2, convert_to_chain_format, match_chain_lengths, get_all_edges, cluster_spring_layout, OT_graph_similarity
 
 from viz import plot_vector_field_components_with_edges, plot_combined_vector_field_with_mst, plot_single_component_vector_field
@@ -20,13 +21,14 @@ from test_form import prepare_chain_coords
 from pathlib import Path
 import requests
 from math import ceil
-
+import torch.nn.functional as F
 
 def setup_experiment():
     """Set up experiment directories and logging"""
     # Create a unique run ID based on timestamp
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = f"runs/run_{run_id}"
+    # run_dir = f"runs/run_{run_id}"
+    run_dir = f"runs/tmr_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
     
     # Set up logging
@@ -43,8 +45,17 @@ def setup_experiment():
     
     return run_id, run_dir, logger
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Ensure deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def setup_model(x, adj, logger):
+    set_seed()
     """Initialize models, vector field and optimizer"""
     model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
     
@@ -86,10 +97,11 @@ def setup_model(x, adj, logger):
     
     vf = NeuralOneForm(vf_in, input_dim=None, hidden_dim=None, num_cochains=c)
     model.reset_parameters()
+    vf.apply(vf._init_weights)
     
     # Create joint optimizer
     optimizer = torch.optim.Adam([
-        {'params': model.parameters(), 'lr': 0.0001, 'weight_decay': 0.001},
+        {'params': model.parameters(), 'lr': 0.001, 'weight_decay': 0.001},
         {'params': vf.parameters(), 'lr': 0.001, 'weight_decay': 0.01}
     ])
     
@@ -193,6 +205,8 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         x_original[i] = coord
     logger.info(f"Generated 2D coordinates with shape: {x_original.shape}")
 
+    x_original = torch.tensor(x_original, dtype=torch.float32)
+
     no_nodes = ceil(x.shape[0] * 0.06 * 0.06)
     cluster_centres = cluster_spring_layout(x_original, no_nodes)
 
@@ -218,14 +232,16 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         
         # Integration matrix
         X = generate_integration_matrix(vf, chain)
-        X = X.squeeze() * weights.squeeze()
-        L_vf = torch.mean(X, dim=0)
+        # max_integrals = get_max_integrals(vf, chain)
+        # X_normalised = X.squeeze() / max_integrals
+        X_weighted = X.squeeze() * weights.squeeze()
+        L_vf = torch.mean(X_weighted, dim=0)
         
         if i % log_interval == 0:
-            logger.info(f"X stats: shape={X.shape}, min={X.min().item():.4f}, max={X.max().item():.4f}, mean={X.mean().item():.4f}")
-            logger.info(f"X non-zero elements: {torch.count_nonzero(X).item()} / {X.numel()}")
+            logger.info(f"X_weighted stats: shape={X_weighted.shape}, min={X_weighted.min().item():.4f}, max={X_weighted.max().item():.4f}, mean={X_weighted.mean().item():.4f}")
+            logger.info(f"X non-zero elements: {torch.count_nonzero(X_weighted).item()} / {X_weighted.numel()}")
         
-        X_sum = torch.sum(X, dim=0)
+        X_sum = torch.sum(X_weighted, dim=0)
         
         # Abhi - changing structural preservation term
 
@@ -240,7 +256,18 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         #Abhi
         node_embeddings = model.compute_node_embeddings(x, adj, full_hierarchy=True)
         P = model.cluster_matrix(x, adj)
-        L_emb = OT_graph_similarity(x_out, node_embeddings, P)
+        probs = P.clamp(min=1e-12)
+        entropies = -(probs * torch.log(probs)).sum(dim=1)
+        L_ent = entropies.sum() 
+
+        mean_embeddings = torch.mean(node_embeddings, dim=0)
+        L_var = ((node_embeddings - mean_embeddings) **2).sum()
+
+        
+        # node_embeddings_normalised = F.normalize(node_embeddings, dim=-1)
+        # x_out_normalised = F.normalize(x_out, dim=-1)
+
+        L_emb = OT_graph_similarity(x_out, x_original, P) 
 
         if i % log_interval == 0:    
             logger.info(f"Epoch {i}: L_emb: {L_emb.item():.4f}")
@@ -253,8 +280,12 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         
         # Apply weights to the integration results
         # L = -(X_sum * weights).sum()
-        λ = 1
-        L = L_emb - λ * L_vf
+        λemb = 1
+        λent = 1
+        λvf = 1
+        λvar = 1
+        L = λemb*L_emb - λvf*L_vf
+        print(L_emb, L_ent, L_vf, L_var)
         # L = torch.exp(L * 0.05)
         
         # Compute gradients
@@ -317,8 +348,9 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
             logger.info(f"Epoch {i}: Loss {L.item():.4f}")
         
         # Save embedding visualization checkpoints
-        if i % 200 == 0 and i > 0:
-            save_embedding_checkpoint(model, x, adj, adata_subsampled, i, checkpoint_dir, logger)
+        #if i % 200 == 0 and i > 0:
+            
+        save_embedding_checkpoint(model, x, adj, adata_subsampled, i, checkpoint_dir, logger)
     
     # Save the final model
     torch.save({
@@ -346,7 +378,7 @@ def save_embedding_checkpoint(model, x, adj, adata_subsampled, epoch, checkpoint
         plt.close(fig1)
         
         # Create full hierarchy embedding visualization
-        fig2 = visualize_diffpool_embeddings(model, x, adj, adata_subsampled)
+        fig2 = visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarchy=True)
         checkpoint_path2 = f"{checkpoint_dir}/epoch_{epoch:04d}_full.svg"
         fig2.savefig(checkpoint_path2)
         plt.close(fig2)
@@ -584,11 +616,13 @@ def main():
     FILE_NAME = "data/pancreas.h5ad"
     logger.info(f"Loading data from {FILE_NAME}")
     adata_subsampled, x, adj = preprocess_pancreas_data(FILE_NAME)
-    # FILE_NAME = "data/setty_bone_marrow.h5ad"
-    # logger.info(f"Loading bone marrow data from {FILE_NAME}")
+    FILE_NAME = "data/setty_bone_marrow.h5ad"
+    logger.info(f"Loading bone marrow data from {FILE_NAME}")
 
-    # from dataset import preprocess_bone_marrow_data, preprocess_bone_marrow_data_subsampled
-    # adata_subsampled, x, adj = preprocess_bone_marrow_data_subsampled(FILE_NAME)
+    # from dataset import preprocess_bone_marrow_data, preprocess_bone_marrow_data_subsampled, pre_process_bone_marrow_directed, create_toy_multifurcating_data
+    # adata_subsampled, x, adj = pre_process_bone_marrow_directed(FILE_NAME)
+
+    # adata_subsampled, x, adj = create_toy_multifurcating_data()
 
     # Setup model, vector field and optimizer
     model, vf, optimizer, c = setup_model(x, adj, logger)
@@ -600,7 +634,7 @@ def main():
     epochs = 50
     losses, grad_norms_vf, grad_norms_model, x_sums = train_model(
         model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir, logger)
-    
+
     # Plot training metrics
     plot_training_metrics(losses, grad_norms_vf, grad_norms_model, x_sums, run_dir, logger)
     
@@ -614,7 +648,7 @@ def main():
     checkpoint_dir = f"{run_dir}/embedding_checkpoints"
     create_embedding_animation(checkpoint_dir, run_dir, logger)
 
-    fig1 = visualize_joint_embeddings(model, x, adj, adata_subsampled, full_hierarchy=False)
+    fig1 = visualize_joint_embeddings(model, x, adj, adata_subsampled, full_hierarchy=True)
     fig1.savefig(f"{run_dir}/joint_embeddings_intermediate.png", dpi=300)
     
     logger.info(f"Training completed. Results saved to {run_dir}")

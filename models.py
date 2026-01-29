@@ -82,7 +82,8 @@ class DiffPool(torch.nn.Module):
 
         z_1 = self.gnn2_embed(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
-        return torch.softmax(s_0 @ s_1, dim=-1)
+        P = s_0 @ s_1
+        return P
     
     def compute_node_embeddings(self, x_0, adj_0, full_hierarchy=False):
         """
@@ -128,7 +129,7 @@ class DiffPool(torch.nn.Module):
                 # Map original nodes to the intermediate embedding space
                 node_embeddings = s_0 @ z_1  # (N, output_dim)
 
-            node_embeddings = self.projection(node_embeddings)
+            # node_embeddings = self.projection(node_embeddings)
             
             return node_embeddings
     
@@ -333,7 +334,7 @@ class DiffPool3(torch.nn.Module):
 
 
 class DirectedDiffPool(torch.nn.Module):
-    def __init__(self, num_features, max_nodes, hidden_dim=16, output_dim=2, n_layers=2, cluster_ratio=0.06):
+    def __init__(self, num_features, max_nodes, hidden_dim=16, output_dim=10, n_layers=2, cluster_ratio=0.06):
         super(DirectedDiffPool, self).__init__()
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim # 2
@@ -377,9 +378,9 @@ class DirectedDiffPool(torch.nn.Module):
         z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
         z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
         z_0 = z_0_in + z_0_out
-        s_0_out = self.gnn1_pool_out(adj_0, x_0)
-        s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
-        s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+        s_0_out = torch.softmax(self.gnn1_pool_out(adj_0, x_0), dim =-1)
+        s_0_in  = torch.softmax(self.gnn1_pool_in(adj_0.T, x_0), dim = -1)
+        s_0   = (s_0_out + s_0_in) / 2
         # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
 
         x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
@@ -393,9 +394,9 @@ class DirectedDiffPool(torch.nn.Module):
         z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         z_1 = z_1_in + z_1_out
-        s_1_out = self.gnn2_pool_out(adj_1, x_1)
-        s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
-        s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+        s_1_out = torch.softmax(self.gnn2_pool_out(adj_1, x_1), dim=-1)
+        s_1_in  = torch.softmax(self.gnn2_pool_in(adj_1.T, x_1), dim=-1)
+        s_1   = (s_1_out + s_1_in) / 2
         # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
 
         x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
@@ -408,6 +409,9 @@ class DirectedDiffPool(torch.nn.Module):
         # if unbatch_output:
         #     x_2 = x_2.squeeze(0)
         #     adj_2 = adj_2.squeeze(0)
+
+        #Abhi - trying to match the projection in compute_node_embeddings
+        x_2_projected = self.projection(x_2)
 
         return x_2, adj_2
     
@@ -432,9 +436,9 @@ class DirectedDiffPool(torch.nn.Module):
             z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
             z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
             z_0 = z_0_in + z_0_out
-            s_0_out = self.gnn1_pool_out(adj_0, x_0)
-            s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
-            s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+            s_0_out = torch.softmax(self.gnn1_pool_out(adj_0, x_0), dim =-1)
+            s_0_in  = torch.softmax(self.gnn1_pool_in(adj_0.T, x_0), dim = -1)
+            s_0   = (s_0_out + s_0_in) / 2
             # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
 
             # Intermediate representations
@@ -455,16 +459,18 @@ class DirectedDiffPool(torch.nn.Module):
                 z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
                 z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
                 z_1 = z_1_in + z_1_out
-                s_1_out = self.gnn2_pool_out(adj_1, x_1)
-                s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
-                s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+                s_1_out = torch.softmax(self.gnn2_pool_out(adj_1, x_1), dim=-1)
+                s_1_in  = torch.softmax(self.gnn2_pool_in(adj_1.T, x_1), dim=-1)
+                s_1   = (s_1_out + s_1_in) / 2
                 # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
 
                 x_2 = s_1.t() @ z_1 # (64, 8)' x (64, 2) = (8, 2)
+                x_2_projected = self.projection(x_2)
                 
                 # Map original nodes all the way to final embedding space through both hierarchical levels
                 # This directly relates each node to the final coarsened clusters
-                node_embeddings = s_0 @ s_1 @ x_2  # (N, num_clusters_2) @ (num_clusters_2, output_dim)
+                P = s_0 @ s_1
+                node_embeddings = P @ x_2  # (N, num_clusters_2) @ (num_clusters_2, output_dim)
             else:
                 # # Original approach - project to intermediate embedding space
                 # z_1 = self.gnn2_embed(adj_1, x_1)  # (num_clusters_1, output_dim)
@@ -474,7 +480,7 @@ class DirectedDiffPool(torch.nn.Module):
                 # Map original nodes to the intermediate embedding space
                 node_embeddings = s_0 @ z_1  # (N, output_dim)
 
-            node_embeddings = self.projection(node_embeddings)
+            # node_embeddings = self.projection(node_embeddings)
             
             return node_embeddings
     
@@ -490,9 +496,9 @@ class DirectedDiffPool(torch.nn.Module):
         z_0_in = self.gnn1_embed_in(adj_0, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
         z_0_out = self.gnn1_embed_out(adj_0.T, x_0) # (1848, 1848) x (1848, 2) x (2, 16) = (1848, 16)
         z_0 = z_0_in + z_0_out
-        s_0_out = self.gnn1_pool_out(adj_0, x_0)
-        s_0_in  = self.gnn1_pool_in(adj_0.T, x_0)
-        s_0   = torch.softmax(s_0_out + s_0_in, dim=-1)
+        s_0_out = torch.softmax(self.gnn1_pool_out(adj_0, x_0), dim =-1)
+        s_0_in  = torch.softmax(self.gnn1_pool_in(adj_0.T, x_0), dim = -1)
+        s_0   = (s_0_out + s_0_in) / 2
         # s_0 = torch.softmax(self.gnn1_pool(adj_0, x_0), dim=-1) # (1848, 1848) x (1848, 2) x (2, 64) = (1848, 64)
 
         x_1 = s_0.t() @ z_0 # (1848, 64)' x (1848, 16) = (64, 16)
@@ -506,12 +512,12 @@ class DirectedDiffPool(torch.nn.Module):
         z_1_in = self.gnn2_embed_in(adj_1, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         z_1_out = self.gnn2_embed_out(adj_1.T, x_1) # (64, 64) x (64, 16) x (16, 2) = (64, 2)
         z_1 = z_1_in + z_1_out
-        s_1_out = self.gnn2_pool_out(adj_1, x_1)
-        s_1_in  = self.gnn2_pool_in(adj_1.T, x_1)
-        s_1   = torch.softmax(s_1_out + s_1_in, dim=-1)
+        s_1_out = torch.softmax(self.gnn2_pool_out(adj_1, x_1), dim=-1)
+        s_1_in  = torch.softmax(self.gnn2_pool_in(adj_1.T, x_1), dim=-1)
+        s_1   = (s_1_out + s_1_in) / 2
         # s_1 = torch.softmax(self.gnn2_pool(adj_1, x_1), dim=-1) # (64, 64) x (64, 16) x (16, 8) = (64, 8)
-
-        return torch.softmax(s_0 @ s_1, dim=-1)
+        P = s_0 @ s_1
+        return P
     
     def reset_parameters(self):
         """Initialize model weights using Xavier initialization"""

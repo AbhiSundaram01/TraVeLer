@@ -328,8 +328,9 @@ def match_chain_lengths(chain_coords, chain):
 def get_all_edges(x_out, adj_out):
     edge_list = []
     for i in range(adj_out.shape[0]):
-        for j in range(i+1, adj_out.shape[0]):  # Only upper triangle to avoid duplicates
-            edge_list.append((i, j))
+        for j in range(adj_out.shape[1]):  # We want every possible edge (ij) and (ji)
+            if i != j:
+                edge_list.append((i, j))
     
     chain = torch.zeros((len(edge_list), 2, x_out.shape[1]), device=x_out.device)
     for idx, (i, j) in enumerate(edge_list):
@@ -391,9 +392,35 @@ def OT_graph_similarity(x_out, node_embeddings, P, epsilon=0.01, n_iters=50):
         Differentiable alignment loss
    
     """
+    # # Normalizing coordinates safely for autograd
+    # sets = [x_out, node_embeddings]
+    # normalized_sets = []
+
+    # for distribution in sets:
+    #     xs = distribution[:, 0]
+    #     ys = distribution[:, 1]
+
+    #     mu_x = xs.mean()
+    #     mu_y = ys.mean()
+    #     std_x = xs.std() + 1e-8
+    #     std_y = ys.std() + 1e-8
+
+    #     # out-of-place normalization
+    #     normalized_distribution = torch.stack([
+    #         (xs - mu_x) / std_x,
+    #         (ys - mu_y) / std_y
+    #     ], dim=1)
+
+    #     normalized_sets.append(normalized_distribution)
+
+    # # overwrite with normalized versions
+    # x_out, node_embeddings = normalized_sets
+
     N = x_out.shape[0]
+    n = node_embeddings.shape[0]
     # 1. Compute pairwise squared distances (cost matrix)
     C = torch.cdist(node_embeddings, x_out, p=2) ** 2
     # 2. Compute alignment loss
     
-    return torch.sum(P * C) / N**2
+    return torch.sum(P * C) / (N*n)
+

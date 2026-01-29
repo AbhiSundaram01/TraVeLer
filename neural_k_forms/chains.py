@@ -41,7 +41,7 @@ def generate_integration_matrix(form, chain, d=5):
     containing the integrals of a set of 1-forms along some chains.
 
     Parameters
-    ----------
+    ----------max_integrals 
     form : a Pytorch Sequential object
         The 1-form, i.e. vector field to be applied to the chain. Notice
         that the 1-form results in multiple cochains being represented.
@@ -208,3 +208,25 @@ def weighted_integration(vf, chain):
     X_balanced = torch.sum(torch.stack(weighted_results), dim=0)
     
     return X_balanced
+
+def get_max_integrals(form, chain, d=5):
+
+    r, _, n = chain.shape
+
+    # 1. Discretize chain
+    t = torch.linspace(0, 1, d, device=chain.device).view(1, d, 1)  # 1 x d x 1
+    chain_disc = chain[:,0,:].unsqueeze(1) + t * (chain[:,1,:] - chain[:,0,:]).unsqueeze(1)  # r x d x n
+
+    # 2. Evaluate the vector field along all discretized points
+    out = form(chain_disc)  # r x d x n 
+
+    V_mag = out.norm(dim=2).max(dim=1)[0]
+
+    # 4. Compute edge lengths
+    edge_vec = chain[:,1,:] - chain[:,0,:]  # r x n
+    edge_length = edge_vec.norm(dim=1)  # r 
+
+    # 5. Maximum integral along each edge
+    max_integral = V_mag * edge_length  # r 
+
+    return max_integral

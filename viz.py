@@ -578,45 +578,55 @@ def plot_combined_vector_field_with_mst(vf, chain, x_out, save_to_file=False, fi
     
     # Create the MST
     # Create a networkx graph from the chain data
-    G = nx.Graph()
+    # G = nx.Graph()
     
     # Add all nodes with positions
-    for i in range(len(node_positions)):
-        G.add_node(i, pos=node_positions[i])
+    # for i in range(len(node_positions)):
+    #     G.add_node(i, pos=node_positions[i])
     
     # Add edges from chain
     lines = chain.detach().numpy()
-    for line in lines:
+    # for line in lines:
+    #     point1, point2 = line
+        
+    #     # Find closest nodes to these points
+    #     node1_idx = ((node_positions - point1) ** 2).sum(axis=1).argmin()
+    #     node2_idx = ((node_positions - point2) ** 2).sum(axis=1).argmin()
+        
+    #     # Add edge with weight = distance
+    #     weight = np.linalg.norm(point2 - point1)
+    #     G.add_edge(node1_idx, node2_idx, weight=weight)
+    
+    # # Find the minimum spanning tree
+    # mst = nx.minimum_spanning_tree(G)
+    # log.info(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
+    
+    # if save_to_file:
+    #     logger.info(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
+    # else:
+    #     print(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
+    
+    weights = torch.zeros(len(lines), dtype=torch.float32)
+    for idx, line in enumerate(lines):
         point1, point2 = line
-        
-        # Find closest nodes to these points
-        node1_idx = ((node_positions - point1) ** 2).sum(axis=1).argmin()
-        node2_idx = ((node_positions - point2) ** 2).sum(axis=1).argmin()
-        
-        # Add edge with weight = distance
-        weight = np.linalg.norm(point2 - point1)
-        G.add_edge(node1_idx, node2_idx, weight=weight)
-    
-    # Find the minimum spanning tree
-    mst = nx.minimum_spanning_tree(G)
-    log.info(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
-    
-    if save_to_file:
-        logger.info(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
-    else:
-        print(f"MST visualization: Original graph: {len(G.edges)} edges, MST: {len(mst.edges)} edges")
-    
+        weights[idx] = float(np.linalg.norm(point2 - point1))
+
     # Plot MST edges with colors based on weights
-    weights = [G[u][v]['weight'] for u, v in mst.edges()]
+    # weights = [G[u][v]['weight'] for u, v in mst.edges()]
     cmap = plt.cm.plasma_r
     norm = plt.Normalize(min(weights), max(weights))
     
-    for u, v, w in [(u, v, G[u][v]['weight']) for u, v in mst.edges()]:
-        edge_x = [node_positions[u][0], node_positions[v][0]]
-        edge_y = [node_positions[u][1], node_positions[v][1]]
-        ax.plot(edge_x, edge_y, color=cmap(norm(w)), 
-                linewidth=1.5+3*w/max(weights), alpha=0.8,
-                solid_capstyle='round', zorder=1)
+    # for u, v, w in [(u, v, G[u][v]['weight']) for u, v in mst.edges()]:
+        # edge_x = [node_positions[u][0], node_positions[v][0]]
+        # edge_y = [node_positions[u][1], node_positions[v][1]]
+        # ax.plot(edge_x, edge_y, color=cmap(norm(w)), 
+        #         linewidth=1.5+3*w/max(weights), alpha=0.8,
+        #         solid_capstyle='round', zorder=1)
+    
+    for u, v, w in [(line[0], line[1], weights[idx].item()) for idx, line in enumerate(lines)]:
+        edge_x = [u[0], v[0]]
+        edge_y = [u[1], v[1]]
+        ax.plot(edge_x, edge_y, color=cmap(norm(w)), linewidth=1.5+3*w/max(weights).item(), alpha=0.8,solid_capstyle='round', zorder=1)
     
     # Plot nodes
     scatter = ax.scatter(node_positions[:, 0], node_positions[:, 1], 
@@ -639,8 +649,8 @@ def plot_combined_vector_field_with_mst(vf, chain, x_out, save_to_file=False, fi
     cbar.set_label('Edge Weight (Distance)')
     
     # Add stats to the plot
-    stats_text = (f"Nodes: {len(mst.nodes)}\n"
-                 f"MST Edges: {len(mst.edges)}\n"
+    stats_text = (f"Nodes: {len(node_positions)}\n"
+                 f"MST Edges: {len(lines)}\n"
                  f"Total MST Weight: {sum(weights):.2f}")
     
     ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,

@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import pandas as pd
 import scipy
-
+import scipy.sparse
 import scanpy as sc
 import scvelo as scv
 import torch_geometric.utils as pyg_utils
@@ -70,7 +70,7 @@ class SingleCellDataset:
         return self.adata.n_obs
     
 
-def preprocess_pancreas_data(file_path, subsample_frac=0.5, random_state=42, stratify_by='clusters'):
+def preprocess_pancreas_data(file_path, subsample_frac=1, random_state=42, stratify_by='clusters'):
     """
     Preprocess the pancreas data for DiffPool model.
     
@@ -200,16 +200,59 @@ def create_toy_multifurcating_data():
     adata_toy.obs['clusters'] = adata_toy.obs['group_id'].astype('category')
     
     # Extract raw counts as node features instead of PCA
-    x = torch.tensor(adata_toy.X.toarray() if scipy.sparse.issparse(adata_toy.X) else adata_toy.X, dtype=torch.float)
     
+    x = torch.tensor(
+        adata_toy.X.toarray() if scipy.sparse.issparse(adata_toy.X) else adata_toy.X,
+        dtype=torch.float
+    )
+
+     # Store the undirected KNN graph from scanpy
+    adata_toy.obsp['scanpy_connectivities'] = adata_toy.obsp['connectivities'].copy()
+    
+    # Now compute directed KNN graph from original data
+    X_original = adata_toy.X.toarray() if scipy.sparse.issparse(adata_toy.X) else adata_toy.X
+
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X_original)
+    distances, indices = nbrs.kneighbors(X_original)
+
+    # Create directed connectivity matrix
+    n_cells = adata_toy.n_obs
+    rows = np.repeat(np.arange(n_cells), n_neighbors)
+    cols = indices.flatten()
+    data = np.ones_like(cols)
+
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata_toy.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
+        (data, (rows, cols)), shape=(n_cells, n_cells)
+    )
+    
+    # By default use the directed graph
+    adata_toy.obsp['connectivities'] = adata_toy.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata_toy, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = x = torch.tensor(
+    adata_toy.X.toarray() if scipy.sparse.issparse(adata_toy.X) else adata_toy.X,
+    dtype=torch.float
+)
+
     # Extract the adjacency matrix
     adj = pyg_utils.to_dense_adj(
         pyg_utils.from_scipy_sparse_matrix(adata_toy.obsp['connectivities'])[0]
     ).squeeze(0)
-    
+
     # Ensure the adjacency matrix is symmetric
-    adj = (adj + adj.transpose(0, 1)) / 2
-    
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
     # Convert adjacency matrix to float
     adj = adj.to(torch.float)
     
@@ -300,4 +343,73 @@ def preprocess_bone_marrow_data_subsampled(file_path):
     
     return adata_subsampled_hvg, x, adj
 
+def pre_process_bone_marrow_directed(file_path):
+    print(f"Loading bone marrow dataset from {file_path}")
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Dataset file not found at {file_path}")
+    
+    # Load the dataset
+    adata = sc.read(file_path)
+    
+    # Apply preprocessing
+    sc.pp.filter_genes(adata, min_counts=20)
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    sc.pp.highly_variable_genes(adata)
+    # Use the highly variable genes for downstream analysis
+    adata_hvg = adata[:, adata.var.highly_variable]
+    # Compute PCA and neighbors
+    sc.tl.pca(adata_hvg)
+    sc.pp.neighbors(adata_hvg, n_pcs=10)
+
+    # Store the undirected KNN graph from scanpy
+    adata_hvg.obsp['scanpy_connectivities'] = adata_hvg.obsp['connectivities'].copy()
+    
+    # Now compute directed KNN graph from original data
+    X_original = adata_hvg.X.toarray() if scipy.sparse.issparse(adata_hvg.X) else adata_hvg.X
+
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X_original)
+    distances, indices = nbrs.kneighbors(X_original)
+
+    # Create directed connectivity matrix
+    n_cells = adata_hvg.n_obs
+    rows = np.repeat(np.arange(n_cells), n_neighbors)
+    cols = indices.flatten()
+    data = np.ones_like(cols)
+
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata_hvg.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
+        (data, (rows, cols)), shape=(n_cells, n_cells)
+    )
+    
+    # By default use the directed graph
+    adata_hvg.obsp['connectivities'] = adata_hvg.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata_hvg, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = torch.tensor(adata_hvg.X.toarray(), dtype=torch.float)
+
+    # Extract the adjacency matrix
+    adj = pyg_utils.to_dense_adj(
+        pyg_utils.from_scipy_sparse_matrix(adata_hvg.obsp['connectivities'])[0]
+    ).squeeze(0)
+
+    # Ensure the adjacency matrix is symmetric
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
+    # Convert adjacency matrix to float
+    adj = adj.to(torch.float)
+
+    return adata_hvg, x, adj
 

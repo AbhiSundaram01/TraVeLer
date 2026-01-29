@@ -329,7 +329,7 @@ def visualize_joint_embeddings(model, x, adj, adata_subsampled=None, full_hierar
         categories = list(bio_clusters.cat.categories)
         cmap = plt.cm.get_cmap('tab20', len(categories))
         
-        scatter1 = plt.scatter(node_emb_norm[:, 0], node_emb_norm[:, 1],
+        scatter1 = plt.scatter(node_emb_np[:, 0], node_emb_np[:, 1],
                     c=bio_clusters.cat.codes, cmap=cmap, 
                     s=30, alpha=0.6, edgecolors='none')
         
@@ -343,11 +343,11 @@ def visualize_joint_embeddings(model, x, adj, adata_subsampled=None, full_hierar
         plt.gca().add_artist(legend1)
     else:
         # Just plot nodes without biological cluster coloring
-        plt.scatter(node_emb_norm[:, 0], node_emb_norm[:, 1],
+        plt.scatter(node_emb_np[:, 0], node_emb_np[:, 1],
                     c='royalblue', s=30, alpha=0.6, label="Nodes")
     
     # Plot cluster centers with distinctive markers
-    scatter2 = plt.scatter(cluster_emb_norm[:, 0], cluster_emb_norm[:, 1],
+    scatter2 = plt.scatter(cluster_emb_np[:, 0], cluster_emb_np[:, 1],
                 c='red', s=150, marker='*', edgecolors='black', 
                 label="Cluster Centers")
     
