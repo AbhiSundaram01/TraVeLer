@@ -334,7 +334,7 @@ class DiffPool3(torch.nn.Module):
 
 
 class DirectedDiffPool(torch.nn.Module):
-    def __init__(self, num_features, max_nodes, hidden_dim=16, output_dim=10, n_layers=2, cluster_ratio=0.06):
+    def __init__(self, num_features, max_nodes, hidden_dim=16, output_dim=2, n_layers=2, cluster_ratio=0.015): #Was previously 0.06**** 5/2/26
         super(DirectedDiffPool, self).__init__()
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim # 2

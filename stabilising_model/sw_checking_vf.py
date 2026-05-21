@@ -1,3 +1,11 @@
+import sys
+import os
+
+# Add the repo root (one level above stabilising_model) to Python path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if repo_root not in sys.path:
+    sys.path.append(repo_root)
+
 from dataset import pre_process_bone_marrow_directed
 import scanpy as sc
 import matplotlib.pyplot as plt
@@ -22,13 +30,13 @@ import torch.nn.functional as F
 import multiprocessing as mp
 
 
-FILE_NAME = "../data/setty_bone_marrow.h5ad"
+FILE_NAME = "data/setty_bone_marrow.h5ad"
 
 adata = sc.read(
     filename=FILE_NAME,
     backup_url="https://figshare.com/ndownloader/files/35826944",
 )
-def set_seed(seed=2):
+def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -91,16 +99,20 @@ def setup_model(x, adj, logger):
     return model, vf, optimizer, c
 
 def preprocess_data(adata):
-    sc.pp.filter_genes(adata, min_counts=20)
-    sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata)
+    n = int(0.5 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
 
-    sc.tl.pca(adata)
-    sc.pp.neighbors(adata, n_neighbors=50, n_pcs=10)
-    sc.tl.diffmap(adata, n_comps=10)
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
+    sc.tl.diffmap(adata_subsampled, n_comps=10)
     
-    return adata
+    return adata_subsampled
 
 def diffusion_pseudotime(adata):
     X_diffmap = adata.obsm["X_diffmap"]
@@ -395,7 +407,7 @@ for name, idx, title in labels:
     plt.xlabel(r'$\lambda_{\mathrm{vf}}$', fontsize=LABEL_FONTSIZE)
     plt.ylabel('Spearman correlation', fontsize=LABEL_FONTSIZE)
     plt.title(
-        f'Correlation vs $\\lambda_{{vf}}$ ({title})',
+        f'Correlation vs $\\lambda_{{vf}}$, subsampled f = 0.5, ({title})',
         fontsize=TITLE_FONTSIZE
     )
 

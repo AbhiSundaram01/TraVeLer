@@ -253,7 +253,7 @@ def visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarch
     with torch.no_grad():
         # Compute embeddings for all original nodes
         node_embeddings = model.compute_node_embeddings(x, adj, full_hierarchy)
-    
+    model.train()
     # Create a single plot with better size for detailed visualization
     plt.figure(figsize=(12, 10))
     

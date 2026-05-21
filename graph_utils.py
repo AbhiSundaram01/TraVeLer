@@ -373,18 +373,18 @@ def cluster_spring_layout(x_original, num_coarse_nodes, device='cpu', dtype=torc
 
     return cluster_centers
 
-def OT_graph_similarity(x_out, node_embeddings, P, epsilon=0.01, n_iters=50):
+def OT_graph_similarity(X_PCA, x_out, P):
     """
     Numerically stable Sinkhorn alignment loss between coarsened nodes
     and target cluster centers.
 
     Parameters
     ----------
-    x_out : torch.Tensor [M, d]
-        Coarsened node embeddings
+    x_diffmap : torch.Tensor [N, d]
+        Diffusion Dimensionality Reduction
     node_embeddings : torch.Tensor [N, d]
-        Origina node positions 
-    P: transport plan from original cells to coarsened nodes
+        Original node embeddings after coarsening 
+
 
     Returns
     -------
@@ -392,35 +392,12 @@ def OT_graph_similarity(x_out, node_embeddings, P, epsilon=0.01, n_iters=50):
         Differentiable alignment loss
    
     """
-    # # Normalizing coordinates safely for autograd
-    # sets = [x_out, node_embeddings]
-    # normalized_sets = []
-
-    # for distribution in sets:
-    #     xs = distribution[:, 0]
-    #     ys = distribution[:, 1]
-
-    #     mu_x = xs.mean()
-    #     mu_y = ys.mean()
-    #     std_x = xs.std() + 1e-8
-    #     std_y = ys.std() + 1e-8
-
-    #     # out-of-place normalization
-    #     normalized_distribution = torch.stack([
-    #         (xs - mu_x) / std_x,
-    #         (ys - mu_y) / std_y
-    #     ], dim=1)
-
-    #     normalized_sets.append(normalized_distribution)
-
-    # # overwrite with normalized versions
-    # x_out, node_embeddings = normalized_sets
 
     N = x_out.shape[0]
-    n = node_embeddings.shape[0]
+    n = X_PCA.shape[0]
     # 1. Compute pairwise squared distances (cost matrix)
-    C = torch.cdist(node_embeddings, x_out, p=2) ** 2
+    C = torch.cdist(torch.tensor(np.array(X_PCA).copy(), dtype=torch.float32), x_out, p=2) ** 2
     # 2. Compute alignment loss
     
-    return torch.sum(P * C) / (N*n)
+    return torch.sum(P*C) / n
 

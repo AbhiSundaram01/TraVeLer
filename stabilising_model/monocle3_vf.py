@@ -1,5 +1,15 @@
 import sys
+from pathlib import Path
 import os
+
+from py_monocle import (
+    learn_graph,
+    order_cells,
+    compute_cell_states,
+    regression_analysis,
+    differential_expression_genes,
+)
+
 
 # Add the repo root (one level above stabilising_model) to Python path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -29,12 +39,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import multiprocessing as mp
 
-
-FILE_NAME = "data/setty_bone_marrow.h5ad"
+FILE_NAME = "data/pancreas.h5ad"
 
 adata = sc.read(
-    filename=FILE_NAME,
-    backup_url="https://figshare.com/ndownloader/files/35826944",
+    filename=FILE_NAME
 )
 def set_seed(seed=42):
     random.seed(seed)
@@ -86,7 +94,7 @@ def setup_model(x, adj, logger):
         nn.Linear(16, 2 * c)
     )
     
-    vf = NeuralOneForm(vf_in, input_dim=10, hidden_dim=128, num_cochains=c)
+    vf = NeuralOneForm(vf_in, input_dim=2, hidden_dim=128, num_cochains=c)
     model.reset_parameters()
     vf.apply(vf._init_weights)
     
@@ -111,23 +119,44 @@ def preprocess_data(adata):
     sc.tl.pca(adata_subsampled)
     sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
     sc.tl.diffmap(adata_subsampled, n_comps=10)
-    
+    sc.tl.tsne(adata_subsampled)
+
     return adata_subsampled
 
-def diffusion_pseudotime(adata):
-    X_diffmap = adata.obsm["X_diffmap"]
+def monocle_pseudotime(adata):
+    umap = adata.obsm["X_umap"]
     # Setting root cell as described above
-    root_ixs = adata.obsm["X_diffmap"][:, 3].argmin()
+    # 1. Define the mask (the condition)
+    mask = umap[:, 0] < umap[:, 0].mean()
+
+    # 2. Find the index within the original array that satisfies the mask AND has the max Y
+    # We use np.where to get the original indices of cells that passed the mask
+    passed_indices = np.where(mask)[0]
+    # Find which of those has the max Y value
+    sub_argmax = umap[mask, 1].argmax()
+    root_ixs = passed_indices[sub_argmax]
     adata.uns["iroot"] = root_ixs
-    sc.tl.dpt(adata)
-    adata.obs["dpt"] = adata.obs["dpt_pseudotime"].copy()
-    return adata.obs["dpt"], root_ixs, X_diffmap
-    
+
+    sc.pp.neighbors(adata, n_neighbors=50, use_rep='X_umap')
+    sc.tl.leiden(adata)
+    leiden = adata.obs["leiden"].to_numpy(dtype=int)
+    projected_points, mst, centroids = learn_graph(matrix=umap, clusters=leiden)
+    pseudotime = order_cells(
+    umap, centroids,
+    mst=mst,
+    projected_points=projected_points,
+    root_cells=[root_ixs],
+    )
+    adata.obs["monocle"] = pseudotime
+
+    return adata.obs["monocle"], root_ixs, umap
+
+
 def get_initial_matrices(adata):
     X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
 
     # Compute directed nearest neighbors
-    n_neighbors = 15  # Default k value
+    n_neighbors = 15  # Default k value 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
     distances, indices = nbrs.kneighbors(X)
 
@@ -262,8 +291,8 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         P = model.cluster_matrix(x, adj)
         node_embeddings = P @ x_out
 
-        L_emb = OT_graph_similarity(X_PCA, x_out, P) 
-        L_local = local_constraint(X_PCA, X_PCA_nbrs, node_embeddings)
+        L_emb = OT_graph_similarity(umap, x_out, P) 
+        L_local = local_constraint(umap, umap_nbrs, node_embeddings)
         probs = P.clamp(min=1e-12)
         entropies = -(probs * torch.log(probs)).sum(dim=1)
         L_ent = entropies.mean()
@@ -299,31 +328,43 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         X_gnn = node_embeddings.detach().cpu().numpy()
         adata_subsampled.obsm['X_gnn'] = X_gnn
         adata_subsampled.uns['iroot'] = root      # same root as before
-        sc.pp.neighbors(adata_subsampled, use_rep='X_gnn', key_added='neighbors_gnn', n_neighbors=50)
-        sc.tl.diffmap(adata_subsampled, neighbors_key='neighbors_gnn', n_comps=min(15, X_gnn.shape[1]))
-        sc.tl.dpt(adata_subsampled, neighbors_key='neighbors_gnn')
-        GNN_dpt = adata_subsampled.obs['dpt_pseudotime'].copy()
 
-
-        combined = pd.concat([dpt, GNN_dpt], axis=1, join='inner')
-        combined.columns = ['dpt', 'gnn_dpt']
-        r, p_value = spearmanr(combined['dpt'], combined['gnn_dpt'])
+        sc.pp.neighbors(adata_subsampled, n_neighbors=50, use_rep='X_gnn')
+        sc.tl.leiden(adata_subsampled)
+        leiden = adata_subsampled.obs["leiden"].to_numpy(dtype=int)
+        projected_points, mst, centroids = learn_graph(matrix=X_gnn, clusters=leiden)
+        gnn_times = order_cells(
+        X_gnn, centroids,
+        mst=mst,
+        projected_points=projected_points,
+        root_cells=[root],
+        )
+        gnn_pseudotime = pd.Series(gnn_times)
+        gnn_pseudotime.index = monocle_pseudotimes.index
+        combined = pd.concat([monocle_pseudotimes, gnn_pseudotime], axis=1, join='inner')
+        combined.columns = ['monocle', 'gnn_time']
+        #Debugging
+        print(combined['gnn_time'])
+        print(combined['monocle'])
+        r, p_value = spearmanr(combined['monocle'], combined['gnn_time'])
         print(f"Spearman correlation: {r:.3f}, p-value: {p_value:.3e}")
         correlations.append(r)
 
-    return losses, node_embeddings, correlations, grad_norms_vf, grad_norms_model
+    return losses, node_embeddings, correlations, grad_norms_vf, grad_norms_model, gnn_pseudotime
 
 
-λ_vf = 0
-λ_laps = [0.01, 0.1, 1, 10]
+λ_vfs = np.logspace(1,4, 7)
+λ_lap = 100
 adata = preprocess_data(adata)
 x, adj = get_initial_matrices(adata)
-X_PCA = adata.obsm['X_pca'][:, :10] 
-nbrs = NearestNeighbors(n_neighbors=51).fit(X_PCA)
-_, X_PCA_nbrs = nbrs.kneighbors(X_PCA)  # returns distances and indices
-X_PCA_nbrs = X_PCA_nbrs[:, 1:]          # drop self (first column)
-Laplacian = get_laplacian(X_PCA, X_PCA_nbrs)
-dpt, root,X_diffmap = diffusion_pseudotime(adata)
+
+monocle_pseudotimes, root, umap = monocle_pseudotime(adata)
+
+nbrs = NearestNeighbors(n_neighbors=21).fit(umap) #Reduce neighbours from 51 - 21
+_, umap_nbrs = nbrs.kneighbors(umap)  # returns distances and indices
+umap_nbrs = umap_nbrs[:, 1:]          # drop self (first column)
+Laplacian = get_laplacian(umap, umap_nbrs)
+
 run_id, run_dir, logger = setup_experiment()
 # Setup model, vector field and optimizer
 adata_run = adata.copy()
@@ -331,183 +372,97 @@ adata_run = adata.copy()
 fig_dir = os.path.join(run_dir, "lambda_vf_plots")
 os.makedirs(fig_dir, exist_ok=True)
 epochs = 150
+seeds = [42]
+correlation_sum = np.zeros((7,3))
+for seed in seeds:
+    set_seed(seed)
+    correlations = np.zeros((7,3))
+    for idx, λ_vf in enumerate(λ_vfs):
+        # Re-initialize model for each λ_vf
+        model, vf, optimizer, c = setup_model(x, adj, logger)
+        epochs = 150    
+        
+        # Train
+        losses, node_embeddings, correlation_trace, grad_norms_vf, grad_norms_model, GNN_pseudotime = train_model(
+            model, vf, optimizer, x, adj, adata_run, epochs, run_dir, logger, λ_vf, Laplacian, λ_lap
+        )
+        correlations[idx][0] = correlation_trace[49]
+        correlations[idx][1] = correlation_trace[99]
+        correlations[idx][2] = correlation_trace[149]
+    correlation_sum += correlations
+correlation_mean = correlation_sum / 1
 
-for idx, λ_lap in enumerate(λ_laps):
-    # Re-initialize model for each λ_vf
-    model, vf, optimizer, c = setup_model(x, adj, logger)  
 
-    # Train
-    losses, node_embeddings, correlation_trace, grad_norms_vf, grad_norms_model = train_model(
-        model, vf, optimizer, x, adj, adata_run, epochs, run_dir, logger, λ_vf, Laplacian, λ_lap
-    )
-    # -------------------------------
-    # Plot styling
-    # -------------------------------
-    TITLE_FONTSIZE = 20
-    LABEL_FONTSIZE = 18
-    TICK_FONTSIZE = 16
-    LEGEND_FONTSIZE = 16
-    LINEWIDTH = 2.5
-    MARKERSIZE = 6
+# -------------------------------
+# Save data used for plotting
+# -------------------------------
+plot_data_dir = os.path.join(run_dir, "plot_data")
+os.makedirs(plot_data_dir, exist_ok=True)
 
-    BLUE = 'tab:blue'
-    RED = 'tab:red'
+# Save as NumPy (exact reproduction)
+np.savez(
+    os.path.join(plot_data_dir, "correlation_vs_lambda_vf.npz"),
+    lambda_vf=λ_vfs,
+    correlation_mean=correlation_mean,
+    epochs=np.array([50, 100, 150])
+)
 
-    # Create figure
-    plt.figure(figsize=(8, 6))
+# Save as CSV (human-readable, easy to replot)
+df_plot = pd.DataFrame(
+    correlation_mean,
+    columns=["epoch_50", "epoch_100", "epoch_150"]
+)
+df_plot.insert(0, "lambda_vf", λ_vfs)
 
-    # Plot loss (BLUE)
-    plt.plot(
-        range(1, epochs + 1),
-        losses,
-        label='Training Loss',
-        color=BLUE,
-        linewidth=LINEWIDTH,
+df_plot.to_csv(
+    os.path.join(plot_data_dir, "correlation_vs_lambda_vf.csv"),
+    index=False
+)
+
+print(f"Saved plot data to {plot_data_dir}")
+
+
+# -------------------------------
+# Plot settings (global)
+# -------------------------------
+LABEL_FONTSIZE = 16
+TITLE_FONTSIZE = 18
+TICK_FONTSIZE = 14
+LINEWIDTH = 2.5
+MARKERSIZE = 7
+
+labels = [
+    ('early', 0, 'Epoch 50'),
+    ('mid',   1, 'Epoch 100'),
+    ('late',  2, 'Epoch 150'),
+]
+
+for name, idx, title in labels:
+    plt.figure(figsize=(6.5, 5))
+    
+    plt.semilogx(
+        λ_vfs,
+        correlation_mean[:, idx],
         marker='o',
-        markersize=MARKERSIZE
-    )
-    # Vertical line at epoch 100
-    # plt.axvline(x=50, color='gray', linestyle='--', linewidth=1, label='λ_lap = 0')
-    # Plot correlation on secondary y-axis (RED)
-    ax1 = plt.gca()
-    ax2 = ax1.twinx()
-
-    ax2.plot(
-        range(1, epochs + 1),
-        correlation_trace,
-        label='Spearman Correlation',
-        color=RED,
         linewidth=LINEWIDTH,
-        marker='x',
         markersize=MARKERSIZE
     )
 
-    # Axis labels (match colors)
-    ax1.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
-    ax1.set_ylabel('Loss', fontsize=LABEL_FONTSIZE, color=BLUE)
-    ax2.set_ylabel('Spearman Correlation', fontsize=LABEL_FONTSIZE, color=RED)
-
-    # Tick colors + sizes
-    ax1.tick_params(axis='y', labelcolor=BLUE, labelsize=TICK_FONTSIZE)
-    ax2.tick_params(axis='y', labelcolor=RED, labelsize=TICK_FONTSIZE)
-    ax1.tick_params(axis='x', labelsize=TICK_FONTSIZE)
-
-    # Title
+    plt.xlabel(r'$\lambda_{\mathrm{vf}}$', fontsize=LABEL_FONTSIZE)
+    plt.ylabel('Spearman correlation', fontsize=LABEL_FONTSIZE)
     plt.title(
-        f'Training Loss and Correlation over Epochs\n$\\lambda_{{lap}}$ = {λ_lap:.1e}',
+        f'Correlation vs $\\lambda_{{vf}}$, subsampled f = 1, ({title})',
         fontsize=TITLE_FONTSIZE
     )
 
-    # Legend (combined)
-    lines_1, labels_1 = ax1.get_legend_handles_labels()
-    lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax1.legend(
-        lines_1 + lines_2,
-        labels_1 + labels_2,
-        loc='upper right',
-        fontsize=LEGEND_FONTSIZE
-    )
+    plt.xticks(fontsize=TICK_FONTSIZE)
+    plt.yticks(fontsize=TICK_FONTSIZE)
 
-    # Grid and layout
-    ax1.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.grid(True, which='both', linestyle='--', alpha=0.5)
+
     plt.tight_layout()
-
-    # Save figure
-    save_path = os.path.join(fig_dir, f'loss_corr_lambda_lap_{λ_lap:.0e}.png')
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-    print(f"Saved plot for λ_lap={λ_lap:.1e} at {save_path}")
-
-    sc.settings.figdir = fig_dir  # your folder
-
-    sc.pl.scatter(
-    adata_run,
-    basis="tsne",
-    color=["dpt_pseudotime"],
-    color_map="gnuplot2",
-    save=f"_GNN_dpt_lambda_lap_{λ_lap:.0e}.png"
+    plt.savefig(
+        os.path.join(fig_dir, f'correlation_vs_lambda_vf_{name}.png'),
+        dpi=300
     )
-
-
-    #     # ---- Gradient norm plot ----
-    # plt.figure(figsize=(8, 6))
-
-    # plt.plot(
-    #     range(1, epochs + 1),
-    #     grad_norms_model,
-    #     label='Model gradient norm',
-    #     marker='o'
-    # )
-
-    # plt.plot(
-    #     range(1, epochs + 1),
-    #     grad_norms_vf,
-    #     label='Vector field gradient norm',
-    #     marker='x'
-    # )
-
-    # # Vertical line at epoch 100
-    # plt.axvline(x=100, color='gray', linestyle='--', linewidth=1, label='λ_vf → 0')
-
-    # plt.yscale('log')  # IMPORTANT: gradients span orders of magnitude
-
-    # plt.xlabel('Epoch')
-    # plt.ylabel('Gradient norm (log scale)')
-    # plt.title(f'Gradient norms over training\nλ_vf = {λ_vf:.1e}')
-    # plt.legend()
-    # plt.grid(True, which='both', linestyle='--', alpha=0.5)
-
-    # grad_save_path = os.path.join(
-    #     fig_dir, f'grad_norms_lambda_vf_{λ_vf:.0e}.png'
-    # )
-    # plt.tight_layout()
-    # plt.savefig(grad_save_path, dpi=300)
-    # plt.close()
-
-    # print(f"Saved gradient norm plot for λ_vf={λ_vf:.1e} at {grad_save_path}")
-
-
-
-
-# # Convert λ_vfs to a NumPy array in case it isn't already
-# λ_vfs = np.array(λ_vfs)
-
-# # Create figure
-# plt.figure(figsize=(8, 6))
-
-# # Plot Spearman correlation vs λ_vf
-# plt.plot(λ_vfs, correlations, marker='o', linestyle='-', color='blue')
-
-# # Logarithmic x-axis
-# plt.xscale('log')
-
-# # Labels and title
-# plt.xlabel(r'$\lambda_{vf}$ (vector field weight)')
-# plt.ylabel('Spearman Correlation')
-# plt.title('Effect of λ_vf on Pseudotime Alignment')
-
-# # Grid for readability
-# plt.grid(True, which='both', linestyle='--', alpha=0.5)
-
-# # Save the figure
-# save_path = os.path.join(run_dir, 'correlation_vs_lambda_vf.png')
-# plt.savefig(save_path, dpi=300)
-# plt.close()
-
-# print(f"Correlation vs λ_vf plot saved to {save_path}")
-
-
-# X_gnn = node_embeddings.detach().cpu().numpy()
-# adata.obsm['X_gnn'] = X_gnn
-# adata.uns['iroot'] = root      # same root as before
-# sc.pp.neighbors(adata, use_rep='X_gnn', key_added='neighbors_gnn', n_neighbors=15)
-# sc.tl.diffmap(adata, neighbors_key='neighbors_gnn', n_comps=min(15, X_gnn.shape[1]))
-# sc.tl.dpt(adata, neighbors_key='neighbors_gnn')
-# GNN_dpt = adata.obs['dpt_pseudotime'].copy()
-
-
-# combined = pd.concat([dpt, GNN_dpt], axis=1, join='inner')
-# combined.columns = ['dpt', 'gnn_dpt']
-# r, p_value = spearmanr(combined['dpt'], combined['gnn_dpt'])
-# print(f"Spearman correlation: {r:.3f}, p-value: {p_value:.3e}")
+    plt.close()

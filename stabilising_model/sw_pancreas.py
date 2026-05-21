@@ -30,11 +30,10 @@ import torch.nn.functional as F
 import multiprocessing as mp
 
 
-FILE_NAME = "data/setty_bone_marrow.h5ad"
+FILE_NAME = "data/pancreas.h5ad"
 
 adata = sc.read(
-    filename=FILE_NAME,
-    backup_url="https://figshare.com/ndownloader/files/35826944",
+    filename=FILE_NAME
 )
 def set_seed(seed=42):
     random.seed(seed)
@@ -111,13 +110,14 @@ def preprocess_data(adata):
     sc.tl.pca(adata_subsampled)
     sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
     sc.tl.diffmap(adata_subsampled, n_comps=10)
-    
+    sc.tl.tsne(adata_subsampled)
+
     return adata_subsampled
 
 def diffusion_pseudotime(adata):
     X_diffmap = adata.obsm["X_diffmap"]
     # Setting root cell as described above
-    root_ixs = adata.obsm["X_diffmap"][:, 3].argmin()
+    root_ixs = adata.obsm["X_tsne"][:, 1].argmin()
     adata.uns["iroot"] = root_ixs
     sc.tl.dpt(adata)
     adata.obs["dpt"] = adata.obs["dpt_pseudotime"].copy()
@@ -127,7 +127,7 @@ def get_initial_matrices(adata):
     X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
 
     # Compute directed nearest neighbors
-    n_neighbors = 15  # Default k value
+    n_neighbors = 15  # Default k value 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
     distances, indices = nbrs.kneighbors(X)
 
@@ -311,15 +311,15 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
         print(f"Spearman correlation: {r:.3f}, p-value: {p_value:.3e}")
         correlations.append(r)
 
-    return losses, node_embeddings, correlations, grad_norms_vf, grad_norms_model
+    return losses, node_embeddings, correlations, grad_norms_vf, grad_norms_model, GNN_dpt
 
 
 λ_vf = 0
-λ_laps = [0.01, 0.1, 1, 10]
+λ_laps = [0, 0.01, 0.1, 1, 10, 100, 1000]
 adata = preprocess_data(adata)
 x, adj = get_initial_matrices(adata)
 X_PCA = adata.obsm['X_pca'][:, :10] 
-nbrs = NearestNeighbors(n_neighbors=51).fit(X_PCA)
+nbrs = NearestNeighbors(n_neighbors=21).fit(X_PCA) #Reduce neighbours from 51 - 21
 _, X_PCA_nbrs = nbrs.kneighbors(X_PCA)  # returns distances and indices
 X_PCA_nbrs = X_PCA_nbrs[:, 1:]          # drop self (first column)
 Laplacian = get_laplacian(X_PCA, X_PCA_nbrs)
@@ -337,7 +337,7 @@ for idx, λ_lap in enumerate(λ_laps):
     model, vf, optimizer, c = setup_model(x, adj, logger)  
 
     # Train
-    losses, node_embeddings, correlation_trace, grad_norms_vf, grad_norms_model = train_model(
+    losses, node_embeddings, correlation_trace, grad_norms_vf, grad_norms_model, GNN_dpt = train_model(
         model, vf, optimizer, x, adj, adata_run, epochs, run_dir, logger, λ_vf, Laplacian, λ_lap
     )
     # -------------------------------
