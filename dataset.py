@@ -132,6 +132,7 @@ def preprocess_pancreas_data(file_path, subsample_frac=1, random_state=42, strat
     n_cells = adata_subsampled.n_obs
     rows = np.repeat(np.arange(n_cells), n_neighbors)
     cols = indices.flatten()
+    
     data = np.ones_like(cols)
 
     # Remove self-loops
