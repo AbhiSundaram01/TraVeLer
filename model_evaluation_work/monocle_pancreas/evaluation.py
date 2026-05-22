@@ -83,19 +83,23 @@ def setup_run(label: str = "monocle_pancreas"):
 # Data
 # ---------------------------------------------------------------------------
 
-def load_and_preprocess() -> sc.AnnData:
+def load_and_preprocess():
     adata = sc.read(str(DATA_FILE))
+    n = int(1 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
 
-    sc.pp.filter_genes(adata, min_counts=20)
-    sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata)
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
+    sc.tl.diffmap(adata_subsampled, n_comps=10)
+    sc.tl.tsne(adata_subsampled)
 
-    sc.tl.pca(adata, random_state=42)
-    sc.pp.neighbors(adata, n_neighbors=50, n_pcs=10, random_state=42)
-    sc.tl.umap(adata, random_state=42)
-
-    return adata
+    return adata_subsampled
 
 
 def get_root(adata: sc.AnnData) -> int:
@@ -126,28 +130,50 @@ def compute_monocle_control(adata: sc.AnnData, root: int):
     return pd.Series(pseudotime, index=adata.obs_names)
 
 
-def get_initial_matrices(adata: sc.AnnData):
-    X = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    n_cells = adata.n_obs
-    n_neighbors = 15
 
+def get_initial_matrices(adata):
+    X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
+
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
-    _, indices = nbrs.kneighbors(X)
+    distances, indices = nbrs.kneighbors(X)
 
+    # Create directed connectivity matrix
+    n_cells = adata.n_obs
     rows = np.repeat(np.arange(n_cells), n_neighbors)
     cols = indices.flatten()
-    data = np.ones(len(rows), dtype=np.float32)
-    mask = rows != cols
-    rows, cols, data = rows[mask], cols[mask], data[mask]
+    data = np.ones_like(cols)
 
-    adata.obsp["connectivities"] = scipy.sparse.csr_matrix(
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
         (data, (rows, cols)), shape=(n_cells, n_cells)
     )
 
-    x = torch.tensor(X, dtype=torch.float)
+    # By default use the directed graph
+    adata.obsp['connectivities'] = adata.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = torch.tensor(adata.X.toarray(), dtype=torch.float)
+
+    # Extract the adjacency matrix
     adj = pyg_utils.to_dense_adj(
-        pyg_utils.from_scipy_sparse_matrix(adata.obsp["connectivities"])[0]
-    ).squeeze(0).float()
+        pyg_utils.from_scipy_sparse_matrix(adata.obsp['connectivities'])[0]
+    ).squeeze(0)
+
+    # Ensure the adjacency matrix is symmetric
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
+    # Convert adjacency matrix to float
+    adj = adj.to(torch.float)
     return x, adj
 
 
@@ -188,7 +214,7 @@ def ot_alignment_loss(X_target: np.ndarray, x_out: torch.Tensor,
 
 def setup_model(x: torch.Tensor, adj: torch.Tensor):
     set_seed()
-    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
+    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0), cluster_ratio=0.05)
     c = 1
     vf_in = nn.Sequential(
         nn.Conv1d(1, 16, kernel_size=3, padding=1), nn.ReLU(),
@@ -205,7 +231,7 @@ def setup_model(x: torch.Tensor, adj: torch.Tensor):
         nn.Linear(32, 16), nn.ReLU(),
         nn.Linear(16, 2 * c),
     )
-    vf = NeuralOneForm(vf_in, num_cochains=c)
+    vf = NeuralOneForm(vf_in, input_dim=2, hidden_dim=128, num_cochains=c)
     model.reset_parameters()
     vf.apply(vf._init_weights)
     optimizer = torch.optim.Adam([
@@ -222,6 +248,7 @@ def setup_model(x: torch.Tensor, adj: torch.Tensor):
 def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
           monocle_control, root, epochs, lambda_vf, lambda_lap, logger):
     losses, correlations = [], []
+    X_gnn_final, gnn_pseudotime_final = None, None
     torch.autograd.set_detect_anomaly(True)
 
     for i in range(epochs):
@@ -250,8 +277,6 @@ def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
             logger.error(f"Epoch {i}: infinite gradients — stopping run.")
             break
 
-        torch.nn.utils.clip_grad_norm_(vf.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses.append(L.item())
 
@@ -280,11 +305,14 @@ def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
             r = float("nan")
         correlations.append(r)
 
+        X_gnn_final = X_gnn
+        gnn_pseudotime_final = gnn_pseudotime
+
         if i % 10 == 0:
             logger.info(f"Epoch {i:3d}: loss={L.item():.4f}  r={r:.3f}  "
                         f"L_emb={L_emb.item():.4f}  L_lap={L_lap.item():.4f}")
 
-    return losses, correlations
+    return losses, correlations, X_gnn_final, gnn_pseudotime_final
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +345,50 @@ def save_plot(losses, correlations, lambda_lap, fig_dir: Path,
     plt.tight_layout()
 
     save_path = fig_dir / f"loss_corr_llap_{lambda_lap:.0e}.png"
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    return save_path
+
+
+def save_embedding_plots(X_gnn: np.ndarray, X_umap: np.ndarray,
+                         gnn_pseudotime: pd.Series, monocle_control: pd.Series,
+                         lambda_lap: float, fig_dir: Path,
+                         title_prefix: str) -> Path:
+    """
+    Three-panel figure:
+      left   — GNN embedding space coloured by GNN pseudotime
+      centre — UMAP coloured by GNN pseudotime
+      right  — UMAP coloured by Monocle3 control pseudotime (baseline)
+    """
+    gnn_pt = gnn_pseudotime.values.astype(float)
+    ctrl_pt = monocle_control.values.astype(float)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    sc0 = axes[0].scatter(X_gnn[:, 0], X_gnn[:, 1], c=gnn_pt, s=1, cmap="plasma")
+    axes[0].set_title("GNN Embedding Space\n(GNN pseudotime)", fontsize=13)
+    axes[0].set_xlabel("Dim 1", fontsize=11)
+    axes[0].set_ylabel("Dim 2", fontsize=11)
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
+    plt.colorbar(sc0, ax=axes[0], shrink=0.8)
+
+    sc1 = axes[1].scatter(X_umap[:, 0], X_umap[:, 1], c=gnn_pt, s=1, cmap="plasma")
+    axes[1].set_title("UMAP\n(GNN pseudotime)", fontsize=13)
+    axes[1].set_xticks([])
+    axes[1].set_yticks([])
+    plt.colorbar(sc1, ax=axes[1], shrink=0.8)
+
+    sc2 = axes[2].scatter(X_umap[:, 0], X_umap[:, 1], c=ctrl_pt, s=1, cmap="plasma")
+    axes[2].set_title("UMAP\n(Monocle3 control pseudotime)", fontsize=13)
+    axes[2].set_xticks([])
+    axes[2].set_yticks([])
+    plt.colorbar(sc2, ax=axes[2], shrink=0.8)
+
+    fig.suptitle(f"{title_prefix}\n$\\lambda_{{lap}}$ = {lambda_lap:.1e}", fontsize=15)
+    plt.tight_layout()
+
+    save_path = fig_dir / f"embeddings_llap_{lambda_lap:.0e}.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
     return save_path
@@ -357,17 +429,25 @@ def main():
         adata_run = adata.copy()
         model, vf, optimizer = setup_model(x, adj)
 
-        losses, correlations = train(
+        losses, correlations, X_gnn_final, gnn_pt_final = train(
             model, vf, optimizer, x, adj, adata_run,
             X_umap, Laplacian, monocle_control, root,
             epochs, lambda_vf, lambda_lap, logger,
         )
 
         p = save_plot(losses, correlations, lambda_lap, fig_dir,
-                      "Monocle Pancreas — UMAP Laplacian")
+                      "Monocle Pancreas Experiment with UMAP Laplacian")
         np.save(fig_dir / f"losses_llap_{lambda_lap:.0e}.npy", np.array(losses))
         np.save(fig_dir / f"corrs_llap_{lambda_lap:.0e}.npy", np.array(correlations))
         logger.info(f"Saved plot: {p}")
+
+        if X_gnn_final is not None and gnn_pt_final is not None:
+            ep = save_embedding_plots(
+                X_gnn_final, X_umap, gnn_pt_final, monocle_control,
+                lambda_lap, fig_dir,
+                "Monocle Pancreas — Cell Embeddings",
+            )
+            logger.info(f"Saved embedding plot: {ep}")
 
     logger.info(f"\nAll runs complete. Results in: {run_dir}")
 

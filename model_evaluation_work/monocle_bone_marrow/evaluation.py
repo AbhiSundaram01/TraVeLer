@@ -103,7 +103,7 @@ def load_and_preprocess():
     sc.tl.pca(adata_subsampled)
     sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
     sc.tl.diffmap(adata_subsampled, n_comps=10)
-    sc.tl.umap(adata, random_state=42)
+    sc.tl.umap(adata_subsampled, random_state=42)
     
     return adata_subsampled
 
@@ -249,6 +249,7 @@ def setup_model(x: torch.Tensor, adj: torch.Tensor):
 def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
           monocle_control, root, epochs, lambda_vf, lambda_lap, logger):
     losses, correlations = [], []
+    X_gnn_final, gnn_pseudotime_final = None, None
     torch.autograd.set_detect_anomaly(True)
 
     for i in range(epochs):
@@ -305,11 +306,14 @@ def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
             r = float("nan")
         correlations.append(r)
 
+        X_gnn_final = X_gnn
+        gnn_pseudotime_final = gnn_pseudotime
+
         if i % 10 == 0:
             logger.info(f"Epoch {i:3d}: loss={L.item():.4f}  r={r:.3f}  "
                         f"L_emb={L_emb.item():.4f}  L_lap={L_lap.item():.4f}")
 
-    return losses, correlations
+    return losses, correlations, X_gnn_final, gnn_pseudotime_final
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +351,50 @@ def save_plot(losses, correlations, lambda_lap, fig_dir: Path,
     return save_path
 
 
+def save_embedding_plots(X_gnn: np.ndarray, X_umap: np.ndarray,
+                         gnn_pseudotime: pd.Series, monocle_control: pd.Series,
+                         lambda_lap: float, fig_dir: Path,
+                         title_prefix: str) -> Path:
+    """
+    Three-panel figure:
+      left   — GNN embedding space coloured by GNN pseudotime
+      centre — UMAP coloured by GNN pseudotime
+      right  — UMAP coloured by Monocle3 control pseudotime (baseline)
+    """
+    gnn_pt = gnn_pseudotime.values.astype(float)
+    ctrl_pt = monocle_control.values.astype(float)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    sc0 = axes[0].scatter(X_gnn[:, 0], X_gnn[:, 1], c=gnn_pt, s=1, cmap="plasma")
+    axes[0].set_title("GNN Embedding Space\n(GNN pseudotime)", fontsize=13)
+    axes[0].set_xlabel("Dim 1", fontsize=11)
+    axes[0].set_ylabel("Dim 2", fontsize=11)
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
+    plt.colorbar(sc0, ax=axes[0], shrink=0.8)
+
+    sc1 = axes[1].scatter(X_umap[:, 0], X_umap[:, 1], c=gnn_pt, s=1, cmap="plasma")
+    axes[1].set_title("UMAP\n(GNN pseudotime)", fontsize=13)
+    axes[1].set_xticks([])
+    axes[1].set_yticks([])
+    plt.colorbar(sc1, ax=axes[1], shrink=0.8)
+
+    sc2 = axes[2].scatter(X_umap[:, 0], X_umap[:, 1], c=ctrl_pt, s=1, cmap="plasma")
+    axes[2].set_title("UMAP\n(Monocle3 control pseudotime)", fontsize=13)
+    axes[2].set_xticks([])
+    axes[2].set_yticks([])
+    plt.colorbar(sc2, ax=axes[2], shrink=0.8)
+
+    fig.suptitle(f"{title_prefix}\n$\\lambda_{{lap}}$ = {lambda_lap:.1e}", fontsize=15)
+    plt.tight_layout()
+
+    save_path = fig_dir / f"embeddings_llap_{lambda_lap:.0e}.png"
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    return save_path
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -372,7 +420,7 @@ def main():
     logger.info("Control Monocle3 pseudotime computed and saved.")
 
     lambda_vf = 0.0
-    lambda_laps = [0, 0.01, 0.1, 1, 10, 100, 1000]
+    lambda_laps = [0, 0.01, 0.05, 0.1, 0.5, 10]
     epochs = 150
 
     for lambda_lap in lambda_laps:
@@ -381,7 +429,7 @@ def main():
         adata_run = adata.copy()
         model, vf, optimizer = setup_model(x, adj)
 
-        losses, correlations = train(
+        losses, correlations, X_gnn_final, gnn_pt_final = train(
             model, vf, optimizer, x, adj, adata_run,
             X_umap, Laplacian, monocle_control, root,
             epochs, lambda_vf, lambda_lap, logger,
@@ -392,6 +440,14 @@ def main():
         np.save(fig_dir / f"losses_llap_{lambda_lap:.0e}.npy", np.array(losses))
         np.save(fig_dir / f"corrs_llap_{lambda_lap:.0e}.npy", np.array(correlations))
         logger.info(f"Saved plot: {p}")
+
+        if X_gnn_final is not None and gnn_pt_final is not None:
+            ep = save_embedding_plots(
+                X_gnn_final, X_umap, gnn_pt_final, monocle_control,
+                lambda_lap, fig_dir,
+                "Monocle3 Bone Marrow — Cell Embeddings",
+            )
+            logger.info(f"Saved embedding plot: {ep}")
 
     logger.info(f"\nAll runs complete. Results in: {run_dir}")
 
