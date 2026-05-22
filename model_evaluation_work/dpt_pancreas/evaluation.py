@@ -21,6 +21,7 @@ TRAVELER_ROOT = Path(os.environ.get("TRAVELER_ROOT",
                      str(Path(__file__).resolve().parents[2])))
 DATA_FILE = Path(os.environ.get("TRAVELER_DATA",
                  str(TRAVELER_ROOT / "data"))) / "pancreas.h5ad"
+sys.path.insert(0, str(TRAVELER_ROOT))
 sys.path.insert(0, str(TRAVELER_ROOT / 'py_monocle'))
 os.environ.setdefault("DGL_GRAPHBOLT_DISABLE", "1")
 
@@ -248,7 +249,7 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
         losses.append(L.item())
 
         # DPT on soft PCA embeddings (P @ X_pca), compare with control
-        X_soft_pca = (P.detach().cpu() @ torch.tensor(X_pca, dtype=torch.float)).numpy()
+        X_soft_pca = node_embeddings.detach().cpu().numpy()
         adata_run.obsm["X_gnn"] = X_soft_pca
         adata_run.uns["iroot"] = root
         sc.pp.neighbors(adata_run, use_rep="X_gnn", key_added="nbrs_gnn", n_neighbors=50)

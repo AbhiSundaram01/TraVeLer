@@ -22,6 +22,7 @@ TRAVELER_ROOT = Path(os.environ.get("TRAVELER_ROOT",
                      str(Path(__file__).resolve().parents[2])))
 DATA_FILE = Path(os.environ.get("TRAVELER_DATA",
                  str(TRAVELER_ROOT / "data"))) / "setty_bone_marrow.h5ad"
+sys.path.insert(0, str(TRAVELER_ROOT))
 sys.path.insert(0, str(TRAVELER_ROOT / 'py_monocle'))
 os.environ.setdefault("DGL_GRAPHBOLT_DISABLE", "1")
 
