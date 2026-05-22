@@ -84,20 +84,21 @@ def setup_run(label: str = "dpt_pancreas"):
 
 def load_and_preprocess() -> sc.AnnData:
     adata = sc.read(str(DATA_FILE))
+    n = int(1 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
 
-    # Use full dataset (no subsampling) - consistent with sw_pancreas.py
-    sc.pp.filter_genes(adata, min_counts=20)
-    sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata)
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
+    sc.tl.diffmap(adata_subsampled, n_comps=10)
+    sc.tl.tsne(adata_subsampled)
 
-    sc.tl.pca(adata, random_state=42)
-    sc.pp.neighbors(adata, n_neighbors=50, n_pcs=10, random_state=42)
-
-    # Diffmap is required for DPT control
-    sc.tl.diffmap(adata, n_comps=10)
-
-    return adata
+    return adata_subsampled
 
 
 def get_root(adata: sc.AnnData) -> int:
@@ -120,27 +121,48 @@ def compute_dpt_control(adata: sc.AnnData, root: int) -> pd.Series:
 
 
 def get_initial_matrices(adata: sc.AnnData):
-    X = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    n_cells = adata.n_obs
-    n_neighbors = 15
+    X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
 
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
-    _, indices = nbrs.kneighbors(X)
+    distances, indices = nbrs.kneighbors(X)
 
+    # Create directed connectivity matrix
+    n_cells = adata.n_obs
     rows = np.repeat(np.arange(n_cells), n_neighbors)
     cols = indices.flatten()
-    data = np.ones(len(rows), dtype=np.float32)
-    mask = rows != cols
-    rows, cols, data = rows[mask], cols[mask], data[mask]
+    data = np.ones_like(cols)
 
-    adata.obsp["connectivities"] = scipy.sparse.csr_matrix(
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
         (data, (rows, cols)), shape=(n_cells, n_cells)
     )
 
-    x = torch.tensor(X, dtype=torch.float)
+    # By default use the directed graph
+    adata.obsp['connectivities'] = adata.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = torch.tensor(adata.X.toarray(), dtype=torch.float)
+
+    # Extract the adjacency matrix
     adj = pyg_utils.to_dense_adj(
-        pyg_utils.from_scipy_sparse_matrix(adata.obsp["connectivities"])[0]
-    ).squeeze(0).float()
+        pyg_utils.from_scipy_sparse_matrix(adata.obsp['connectivities'])[0]
+    ).squeeze(0)
+
+    # Ensure the adjacency matrix is symmetric
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
+    # Convert adjacency matrix to float
+    adj = adj.to(torch.float)
     return x, adj
 
 
@@ -198,7 +220,7 @@ def setup_model(x: torch.Tensor, adj: torch.Tensor):
         nn.Linear(32, 16), nn.ReLU(),
         nn.Linear(16, 2 * c),
     )
-    vf = NeuralOneForm(vf_in, num_cochains=c)
+    vf = NeuralOneForm(vf_in,  input_dim=10, hidden_dim=128, num_cochains=c)
     model.reset_parameters()
     vf.apply(vf._init_weights)
     optimizer = torch.optim.Adam([
@@ -243,8 +265,6 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
             logger.error(f"Epoch {i}: infinite gradients — stopping run.")
             break
 
-        torch.nn.utils.clip_grad_norm_(vf.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses.append(L.item())
 

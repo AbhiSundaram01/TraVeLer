@@ -90,19 +90,20 @@ def load_and_preprocess():
     UMAP is recomputed as the GNN alignment target.
     """
     adata = sc.read(str(DATA_FILE))
+    n = int(1 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
 
-    sc.pp.filter_genes(adata, min_counts=20)
-    sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata)
-
-    sc.tl.pca(adata, random_state=42)
-    sc.pp.neighbors(adata, n_neighbors=50, n_pcs=10, random_state=42)
-
-    # Diffmap for root selection and DPT control
-    sc.tl.diffmap(adata, n_comps=10)
-
-    return adata
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
+    sc.tl.diffmap(adata_subsampled, n_comps=10)
+    
+    return adata_subsampled
 
 
 def get_root(adata: sc.AnnData) -> int:
@@ -117,31 +118,53 @@ def compute_dpt_control(adata: sc.AnnData, root: int) -> pd.Series:
     """Standard DPT on PCA/diffmap embeddings."""
     adata.uns["iroot"] = root
     sc.tl.dpt(adata)
-    return adata.obs["dpt_pseudotime"].copy()
+    adata.obs["dpt"] = adata.obs["dpt_pseudotime"].copy()
+    return adata.obs["dpt"]
 
 
 def get_initial_matrices(adata: sc.AnnData):
-    X = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    n_cells = adata.n_obs
-    n_neighbors = 15
+    X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
 
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
-    _, indices = nbrs.kneighbors(X)
+    distances, indices = nbrs.kneighbors(X)
 
+    # Create directed connectivity matrix
+    n_cells = adata.n_obs
     rows = np.repeat(np.arange(n_cells), n_neighbors)
     cols = indices.flatten()
-    data = np.ones(len(rows), dtype=np.float32)
-    mask = rows != cols
-    rows, cols, data = rows[mask], cols[mask], data[mask]
+    data = np.ones_like(cols)
 
-    adata.obsp["connectivities"] = scipy.sparse.csr_matrix(
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
         (data, (rows, cols)), shape=(n_cells, n_cells)
     )
 
-    x = torch.tensor(X, dtype=torch.float)
+    # By default use the directed graph
+    adata.obsp['connectivities'] = adata.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = torch.tensor(adata.X.toarray(), dtype=torch.float)
+
+    # Extract the adjacency matrix
     adj = pyg_utils.to_dense_adj(
-        pyg_utils.from_scipy_sparse_matrix(adata.obsp["connectivities"])[0]
-    ).squeeze(0).float()
+        pyg_utils.from_scipy_sparse_matrix(adata.obsp['connectivities'])[0]
+    ).squeeze(0)
+
+    # Ensure the adjacency matrix is symmetric
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
+    # Convert adjacency matrix to float
+    adj = adj.to(torch.float)
     return x, adj
 
 
@@ -222,11 +245,11 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
         optimizer.zero_grad()
 
         x_out, adj_out = model(x, adj)
-        # chain, weights = get_all_edges(x_out, adj_out)
+        chain, weights = get_all_edges(x_out, adj_out)
 
-        # X_int = generate_integration_matrix(vf, chain)
-        # X_weighted = X_int.squeeze() * weights.squeeze()
-        # L_vf = torch.mean(X_weighted, dim=0)
+        X_int = generate_integration_matrix(vf, chain)
+        X_weighted = X_int.squeeze() * weights.squeeze()
+        L_vf = torch.mean(X_weighted, dim=0)
 
         P = model.cluster_matrix(x, adj)
         node_embeddings = P @ x_out
@@ -234,7 +257,7 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
         L_emb = ot_alignment_loss(X_pca, x_out, P)
         L_lap = torch.trace(node_embeddings.T @ Laplacian @ node_embeddings)
 
-        L = L_emb + lambda_lap * L_lap #- lambda_vf * L_vf
+        L = L_emb + lambda_lap * L_lap - lambda_vf * L_vf
         L.backward()
 
         vf_gnorm = sum(p.grad.norm().item() for p in vf.parameters() if p.grad is not None)
@@ -244,8 +267,6 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
             logger.error(f"Epoch {i}: infinite gradients — stopping run.")
             break
 
-        torch.nn.utils.clip_grad_norm_(vf.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses.append(L.item())
 
@@ -323,7 +344,7 @@ def main():
     x, adj = get_initial_matrices(adata)
 
     X_pca = adata.obsm["X_pca"][:, :10]
-    Laplacian = build_pca_laplacian(X_pca, n_neighbors=20)
+    Laplacian = build_pca_laplacian(X_pca, n_neighbors=50)
     logger.info(f"PCA Laplacian built: {Laplacian.shape}")
 
     root = get_root(adata)
@@ -334,7 +355,7 @@ def main():
     logger.info("Control DPT computed and saved.")
 
     lambda_vf = 0.0
-    lambda_laps = [0, 0.01, 0.1, 1, 10, 100, 1000]
+    lambda_laps = [0, 0.01, 0.1, 1, 10, 100]
     epochs = 150
 
     for lambda_lap in lambda_laps:

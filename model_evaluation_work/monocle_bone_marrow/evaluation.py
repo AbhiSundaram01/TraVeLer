@@ -87,25 +87,25 @@ def setup_run(label: str = "monocle_bone_marrow"):
 def load_and_preprocess():
     """
     Load Setty bone marrow dataset.
-    Diffmap is computed for root selection.
+    Diffmap is computed for both root selection and DPT control.
     UMAP is recomputed as the GNN alignment target.
     """
     adata = sc.read(str(DATA_FILE))
+    n = int(1 * adata.n_obs)
+    np.random.seed(42)
+    idx = np.random.choice(adata.n_obs, n, replace=False)
+    adata_subsampled = adata[idx, :].copy()
+    sc.pp.filter_genes(adata_subsampled, min_counts=20)
+    sc.pp.normalize_total(adata_subsampled)
+    sc.pp.log1p(adata_subsampled)
+    sc.pp.highly_variable_genes(adata_subsampled)
 
-    sc.pp.filter_genes(adata, min_counts=20)
-    sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata)
-
-    sc.tl.pca(adata, random_state=42)
-    sc.pp.neighbors(adata, n_neighbors=50, n_pcs=10, random_state=42)
-
-    # Diffmap for root selection
-    sc.tl.diffmap(adata, n_comps=10)
-
+    sc.tl.pca(adata_subsampled)
+    sc.pp.neighbors(adata_subsampled, n_neighbors=50, n_pcs=10)
+    sc.tl.diffmap(adata_subsampled, n_comps=10)
     sc.tl.umap(adata, random_state=42)
-
-    return adata
+    
+    return adata_subsampled
 
 
 def get_root(adata: sc.AnnData) -> int:
@@ -132,28 +132,49 @@ def compute_monocle_control(adata: sc.AnnData, root: int):
     return pd.Series(pseudotime, index=adata.obs_names)
 
 
-def get_initial_matrices(adata: sc.AnnData):
-    X = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    n_cells = adata.n_obs
-    n_neighbors = 15
+def get_initial_matrices(adata):
+    X = torch.FloatTensor(adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X)
 
+    # Compute directed nearest neighbors
+    n_neighbors = 15  # Default k value 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
-    _, indices = nbrs.kneighbors(X)
+    distances, indices = nbrs.kneighbors(X)
 
+    # Create directed connectivity matrix
+    n_cells = adata.n_obs
     rows = np.repeat(np.arange(n_cells), n_neighbors)
     cols = indices.flatten()
-    data = np.ones(len(rows), dtype=np.float32)
-    mask = rows != cols
-    rows, cols, data = rows[mask], cols[mask], data[mask]
+    data = np.ones_like(cols)
 
-    adata.obsp["connectivities"] = scipy.sparse.csr_matrix(
+    # Remove self-loops
+    mask = rows != cols
+    rows = rows[mask]
+    cols = cols[mask]
+    data = data[mask]
+
+    # Create directed connectivity matrix without self-loops
+    adata.obsp['directed_connectivities'] = scipy.sparse.csr_matrix(
         (data, (rows, cols)), shape=(n_cells, n_cells)
     )
 
-    x = torch.tensor(X, dtype=torch.float)
+    # By default use the directed graph
+    adata.obsp['connectivities'] = adata.obsp['directed_connectivities'].copy()
+    # scv.pp.moments(adata, n_pcs=None, n_neighbors=None)
+
+    # Prepare input features (x) and adjacency matrix (adj) for DiffPool
+    # Extract the original features as node features
+    x = torch.tensor(adata.X.toarray(), dtype=torch.float)
+
+    # Extract the adjacency matrix
     adj = pyg_utils.to_dense_adj(
-        pyg_utils.from_scipy_sparse_matrix(adata.obsp["connectivities"])[0]
-    ).squeeze(0).float()
+        pyg_utils.from_scipy_sparse_matrix(adata.obsp['connectivities'])[0]
+    ).squeeze(0)
+
+    # Ensure the adjacency matrix is symmetric
+    # adj = (adj + adj.transpose(0, 1)) / 2
+
+    # Convert adjacency matrix to float
+    adj = adj.to(torch.float)
     return x, adj
 
 
@@ -211,7 +232,7 @@ def setup_model(x: torch.Tensor, adj: torch.Tensor):
         nn.Linear(32, 16), nn.ReLU(),
         nn.Linear(16, 2 * c),
     )
-    vf = NeuralOneForm(vf_in, num_cochains=c)
+    vf = NeuralOneForm(vf_in, input_dim=2, hidden_dim=128, num_cochains=c)
     model.reset_parameters()
     vf.apply(vf._init_weights)
     optimizer = torch.optim.Adam([
@@ -256,8 +277,6 @@ def train(model, vf, optimizer, x, adj, adata_run, X_umap, Laplacian,
             logger.error(f"Epoch {i}: infinite gradients — stopping run.")
             break
 
-        torch.nn.utils.clip_grad_norm_(vf.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         losses.append(L.item())
 
@@ -342,7 +361,7 @@ def main():
     x, adj = get_initial_matrices(adata)
 
     X_umap = adata.obsm["X_umap"]
-    Laplacian = build_umap_laplacian(X_umap, n_neighbors=20)
+    Laplacian = build_umap_laplacian(X_umap, n_neighbors=50) #### note we use 50 neighbours for bone marrow, 20 for pancreas
     logger.info(f"UMAP Laplacian built: {Laplacian.shape}")
 
     root = get_root(adata)
@@ -369,7 +388,7 @@ def main():
         )
 
         p = save_plot(losses, correlations, lambda_lap, fig_dir,
-                      "Monocle Bone Marrow — UMAP Laplacian")
+                      "Monocle3 Bone Marrow Experiment with UMAP Laplacian")
         np.save(fig_dir / f"losses_llap_{lambda_lap:.0e}.npy", np.array(losses))
         np.save(fig_dir / f"corrs_llap_{lambda_lap:.0e}.npy", np.array(correlations))
         logger.info(f"Saved plot: {p}")

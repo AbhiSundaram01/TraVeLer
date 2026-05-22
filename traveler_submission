@@ -12,7 +12,7 @@
 #! Name of the job:
 #SBATCH -J testjob
 #! Which project should be charged:
-#SBATCH -A VENKATARAMANAN-SL3-CPU
+#SBATCH -A VENKATARAMANAN-SL2-CPU
 #SBATCH -p icelake
 #! How many whole nodes should be allocated?
 #SBATCH --nodes=1
@@ -21,7 +21,7 @@
 #! 3380 MiB of memory per CPU.
 #SBATCH --ntasks=64
 #! How much wallclock time will be required?
-#SBATCH --time=10:00:00
+#SBATCH --time=02:00:00
 #! What types of email messages do you wish to receive?
 #SBATCH --mail-type=NONE
 #! Uncomment this to prevent the job from being requeued (e.g. if
