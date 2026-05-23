@@ -50,8 +50,8 @@ from graph_utils import get_all_edges
 # Sweep parameters — edit these based on lambda_lap sweep results
 # ---------------------------------------------------------------------------
 
-LAMBDA_LAP = 1        # fixed from lambda_lap sweep (evaluation.py)
-LAMBDA_VFS = np.logspace(1.5, 4.0, 6)
+LAMBDA_LAP = 0        # fixed from lambda_lap sweep (evaluation.py)
+LAMBDA_VFS = np.logspace(-2, 4.0, 12)
 SEEDS = [1, 2, 3, 4, 5]
 EPOCHS = 150
 

@@ -48,7 +48,7 @@ def set_seed(seed=42):
 def setup_model(x, adj, logger):
     # set_seed()
     """Initialize models, vector field and optimizer"""
-    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
+    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0), output_dim=10)
     
     # # Get vector field size based on initial model output
     # with torch.no_grad():
@@ -99,7 +99,7 @@ def setup_model(x, adj, logger):
     return model, vf, optimizer, c
 
 def preprocess_data(adata):
-    n = int(0.5 * adata.n_obs)
+    n = int(1 * adata.n_obs)
     np.random.seed(42)
     idx = np.random.choice(adata.n_obs, n, replace=False)
     adata_subsampled = adata[idx, :].copy()
