@@ -95,7 +95,7 @@ def setup_run(label: str = "dpt_bone_marrow_vf_sweep"):
 
 def load_and_preprocess():
     adata = sc.read(str(DATA_FILE))
-    n = int(1 * adata.n_obs)
+    n = int(0.5 * adata.n_obs)
     np.random.seed(42)
     idx = np.random.choice(adata.n_obs, n, replace=False)
     adata_subsampled = adata[idx, :].copy()
@@ -275,25 +275,26 @@ def train(model, vf, optimizer, x, adj, adata_run, X_pca, Laplacian,
 # Plotting
 # ---------------------------------------------------------------------------
 
-def plot_correlation_vs_lambda_vf(lambda_vfs, correlation_mean, fig_dir: Path,
-                                   title_prefix: str) -> None:
+def plot_correlation_vs_lambda_vf(lambda_vfs, correlation_mean, correlation_std,
+                                   fig_dir: Path, title_prefix: str) -> None:
     labels = [
         ("early", 0, "Epoch 50"),
         ("mid",   1, "Epoch 100"),
         ("late",  2, "Epoch 150"),
     ]
     for name, idx, epoch_label in labels:
-        plt.figure(figsize=(6.5, 5))
-        plt.semilogx(
-            lambda_vfs, correlation_mean[:, idx],
-            marker="o", linewidth=2.5, markersize=7,
-        )
-        plt.xlabel(r"$\lambda_{\mathrm{vf}}$", fontsize=16)
-        plt.ylabel("Spearman correlation", fontsize=16)
-        plt.title(f"{title_prefix} ({epoch_label})", fontsize=18)
-        plt.xticks(fontsize=14)
-        plt.yticks(fontsize=14)
-        plt.grid(True, which="both", linestyle="--", alpha=0.5)
+        fig, ax = plt.subplots(figsize=(6.5, 5))
+        mu  = correlation_mean[:, idx]
+        sig = correlation_std[:, idx]
+        line, = ax.semilogx(lambda_vfs, mu, marker="o", linewidth=2.5, markersize=7, label="mean")
+        ax.fill_between(lambda_vfs, mu - sig, mu + sig, alpha=0.2, label="± 1 std")
+        ax.axhline(0, color="k", linewidth=0.8, linestyle="--")
+        ax.set_xlabel(r"$\lambda_{\mathrm{vf}}$", fontsize=16)
+        ax.set_ylabel("Spearman correlation", fontsize=16)
+        ax.set_title(f"{title_prefix} ({epoch_label})", fontsize=16)
+        ax.tick_params(labelsize=14)
+        ax.grid(True, which="both", linestyle="--", alpha=0.5)
+        ax.legend(fontsize=13)
         plt.tight_layout()
         plt.savefig(fig_dir / f"correlation_vs_lambda_vf_{name}.png", dpi=300)
         plt.close()
@@ -328,9 +329,9 @@ def main():
     logger.info(f"Sweeping lambda_vf: {LAMBDA_VFS}")
     logger.info(f"Seeds: {SEEDS}  |  Epochs: {EPOCHS}")
 
-    correlation_sum = np.zeros((len(LAMBDA_VFS), 3))
+    correlation_all = np.full((len(SEEDS), len(LAMBDA_VFS), 3), np.nan)
 
-    for seed in SEEDS:
+    for s_idx, seed in enumerate(SEEDS):
         logger.info(f"\n{'='*50}\nSeed {seed}")
         set_seed(seed)
         for vf_idx, lambda_vf in enumerate(LAMBDA_VFS):
@@ -347,26 +348,33 @@ def main():
             def safe_r(epoch_idx):
                 return correlations[epoch_idx] if len(correlations) > epoch_idx else float("nan")
 
-            correlation_sum[vf_idx, 0] += safe_r(49)
-            correlation_sum[vf_idx, 1] += safe_r(99)
-            correlation_sum[vf_idx, 2] += safe_r(149)
+            correlation_all[s_idx, vf_idx, 0] = safe_r(49)
+            correlation_all[s_idx, vf_idx, 1] = safe_r(99)
+            correlation_all[s_idx, vf_idx, 2] = safe_r(149)
 
-    correlation_mean = correlation_sum / len(SEEDS)
+    correlation_mean = np.nanmean(correlation_all, axis=0)
+    correlation_std  = np.nanstd(correlation_all, axis=0)
 
     np.savez(
         plot_data_dir / "correlation_vs_lambda_vf.npz",
         lambda_vf=LAMBDA_VFS,
         correlation_mean=correlation_mean,
+        correlation_std=correlation_std,
+        correlation_all=correlation_all,
         epochs=np.array([50, 100, 150]),
     )
-    df = pd.DataFrame(correlation_mean, columns=["epoch_50", "epoch_100", "epoch_150"])
+    df = pd.DataFrame(
+        np.hstack([correlation_mean, correlation_std]),
+        columns=["epoch_50_mean", "epoch_100_mean", "epoch_150_mean",
+                 "epoch_50_std",  "epoch_100_std",  "epoch_150_std"],
+    )
     df.insert(0, "lambda_vf", LAMBDA_VFS)
     df.to_csv(plot_data_dir / "correlation_vs_lambda_vf.csv", index=False)
     logger.info(f"Saved plot data to {plot_data_dir}")
 
     plot_correlation_vs_lambda_vf(
-        LAMBDA_VFS, correlation_mean, fig_dir,
-        f"DPT Bone Marrow ($\\lambda_{{lap}}={LAMBDA_LAP}$, {len(SEEDS)} seeds)",
+        LAMBDA_VFS, correlation_mean, correlation_std, fig_dir,
+        f"DPT Bone Marrow ($f=0.5$, $\\lambda_{{lap}}={LAMBDA_LAP}$, {len(SEEDS)} seeds)",
     )
     logger.info(f"All runs complete. Results in: {run_dir}")
 
