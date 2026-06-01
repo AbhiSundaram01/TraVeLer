@@ -50,8 +50,8 @@ from graph_utils import get_all_edges
 # ---------------------------------------------------------------------------
 
 LAMBDA_LAP = 100        # fixed from lambda_lap sweep (evaluation.py)
-LAMBDA_VFS = np.logspace(1.5, 4.0, 6)
-SEEDS = [1, 2, 3, 4, 5]
+LAMBDA_VFS = np.logspace(0, 4.0, 9)
+SEEDS = [6,7,8,9,10]
 EPOCHS = 150
 
 
@@ -187,7 +187,7 @@ def ot_alignment_loss(X_target: np.ndarray, x_out: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 def setup_model(x: torch.Tensor, adj: torch.Tensor):
-    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
+    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0), cluster_ratio=0.05, output_dim=10)
     c = 1
     vf_in = nn.Sequential(
         nn.Conv1d(1, 16, kernel_size=3, padding=1), nn.ReLU(),

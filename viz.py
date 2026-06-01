@@ -883,11 +883,24 @@ def plot_single_component_vector_field(vf, chain, x_out, save_to_file=False, fil
     
     # Plot all edges from chain
     lines = chain.detach().numpy()
+    # for i, line in enumerate(lines):
+    #     point1, point2 = line
+    #     ax.plot([point1[0], point2[0]], [point1[1], point2[1]], 
+    #            color='red', linewidth=1.5, alpha=0.8,
+    #            solid_capstyle='round', zorder=1)
     for i, line in enumerate(lines):
         point1, point2 = line
-        ax.plot([point1[0], point2[0]], [point1[1], point2[1]], 
-               color='red', linewidth=1.5, alpha=0.8,
-               solid_capstyle='round', zorder=1)
+        ax.annotate(
+            "",
+            xy=point2,        # arrowhead at destination
+            xytext=point1,    # tail at source
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="red",
+                lw=1.5,
+            ),
+            zorder=1
+        )
     
     # Plot nodes
     scatter = ax.scatter(node_positions[:, 0], node_positions[:, 1], 
@@ -899,7 +912,7 @@ def plot_single_component_vector_field(vf, chain, x_out, save_to_file=False, fil
     step = max(1, len(node_positions) // 15)
     for i in range(0, len(node_positions), step):
         ax.text(node_positions[i, 0], node_positions[i, 1], str(i), 
-                fontsize=8, ha='center', va='center', 
+                fontsize=15, ha='center', va='center', 
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle='round,pad=0.2'),
                 zorder=3)
     
@@ -917,9 +930,9 @@ def plot_single_component_vector_field(vf, chain, x_out, save_to_file=False, fil
                 labelpos='E', coordinates='figure')
     
     # Add title and labels
-    ax.set_title('Single-Component Vector Field with Tree Structure', fontsize=14)
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
+    ax.set_title('Single-Component Vector Field with Tree Structure', fontsize=20)
+    ax.set_xlabel('X coordinate', fontsize = 20)
+    ax.set_ylabel('Y coordinate', fontsize = 20)
     
     # Create custom legend entry for vector field
     legend_elements = [Line2D([0], [0], marker='>', color='blue', linestyle='None',
@@ -927,7 +940,7 @@ def plot_single_component_vector_field(vf, chain, x_out, save_to_file=False, fil
     legend_elements.append(Line2D([0], [0], color='red', lw=2, label='Edge'))
     legend_elements.append(scatter)
     
-    ax.legend(handles=legend_elements, loc='lower right')
+    ax.legend(handles=legend_elements, loc='lower right', fontsize = 20)
     
     plt.tight_layout()
     

@@ -376,16 +376,16 @@ def save_embedding_plots(X_gnn: np.ndarray, X_umap: np.ndarray,
 
     axes[0].scatter(X_gnn[:, 0], X_gnn[:, 1], c=cluster_codes, s=1, cmap=cmap,
                     vmin=-0.5, vmax=len(categories) - 0.5)
-    axes[0].set_title("GNN Embedding Space\n(cell type)", fontsize=13)
-    axes[0].set_xlabel("Dim 1", fontsize=11)
-    axes[0].set_ylabel("Dim 2", fontsize=11)
+    axes[0].set_title("GNN Embedding Space\n(cell type)", fontsize=20)
+    axes[0].set_xlabel("Dim 1", fontsize=20)
+    axes[0].set_ylabel("Dim 2", fontsize=20)
     axes[0].set_xticks([])
     axes[0].set_yticks([])
     handles = [plt.Line2D([0], [0], marker="o", color="w",
                           markerfacecolor=cluster_colors[i],
                           markersize=5, label=cat)
                for i, cat in enumerate(categories)]
-    axes[0].legend(handles=handles, fontsize=6, loc="best",
+    axes[0].legend(handles=handles, fontsize=13, loc="best",
                    markerscale=1.5, framealpha=0.5)
 
     sc1 = axes[1].scatter(X_umap[:, 0], X_umap[:, 1], c=gnn_pt, s=1, cmap="plasma")
@@ -434,7 +434,7 @@ def main():
     logger.info("Control Monocle3 pseudotime computed and saved.")
 
     lambda_vf = 0.0
-    lambda_laps = [0, 0.01, 0.05, 0.1, 0.5, 1, 10, 100]
+    lambda_laps = [0, 1, 100]
     epochs = 150
 
     for lambda_lap in lambda_laps:

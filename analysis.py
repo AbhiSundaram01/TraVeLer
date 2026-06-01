@@ -264,9 +264,9 @@ def visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarch
     
     scatter = plt.scatter(embeddings[:, 0], embeddings[:, 1],
                 c=bio_clusters.cat.codes, cmap=cmap, s=15, alpha=0.7)
-    plt.title('Cell Types in DiffPool Embedding Space', fontsize=16)
-    plt.xlabel('Dimension 1', fontsize=12)
-    plt.ylabel('Dimension 2', fontsize=12)
+    plt.title('Cell Types in DiffPool Embedding Space', fontsize=20)
+    plt.xlabel('Dimension 1', fontsize=18)
+    plt.ylabel('Dimension 2', fontsize=18)
     
     # Create legend with actual cluster names
     handles, labels = scatter.legend_elements()
@@ -274,8 +274,8 @@ def visualize_diffpool_embeddings(model, x, adj, adata_subsampled, full_hierarch
                       labels=categories,
                       title="Cell Types",
                       loc="best",
-                      fontsize=10)
-    plt.setp(legend.get_title(), fontsize=12)
+                      fontsize=18)
+    plt.setp(legend.get_title(), fontsize=18)
     
     # Add grid for better readability
     plt.grid(True, linestyle='--', alpha=0.7)
@@ -339,7 +339,7 @@ def visualize_joint_embeddings(model, x, adj, adata_subsampled=None, full_hierar
                           labels=categories,
                           title="Cell Types",
                           loc="upper right",
-                          fontsize=9)
+                          fontsize=18)
         plt.gca().add_artist(legend1)
     else:
         # Just plot nodes without biological cluster coloring
@@ -353,7 +353,7 @@ def visualize_joint_embeddings(model, x, adj, adata_subsampled=None, full_hierar
     
     # Add legend for cluster centers separately
     plt.legend([scatter2], ["Cluster Centers"], 
-              loc="lower right", fontsize=12)
+              loc="lower left", fontsize=18)
     
     # # Draw connections from each node to nearest cluster (optional)
     # # This is computationally expensive, so we'll do it for a sample of nodes
@@ -377,9 +377,9 @@ def visualize_joint_embeddings(model, x, adj, adata_subsampled=None, full_hierar
     
     # Add title and labels
     hierarchy_type = "Full Hierarchy" if full_hierarchy else "Intermediate Hierarchy"
-    plt.title(f'Joint Visualization of Node and Cluster Embeddings ({hierarchy_type})', fontsize=16)
-    plt.xlabel('Dimension 1', fontsize=12)
-    plt.ylabel('Dimension 2', fontsize=12)
+    plt.title(f'Joint Visualization of Node and Cluster Embeddings ({hierarchy_type})', fontsize=20)
+    plt.xlabel('Dimension 1', fontsize=18)
+    plt.ylabel('Dimension 2', fontsize=18)
     plt.grid(True, linestyle='--', alpha=0.3)
     
     plt.tight_layout()

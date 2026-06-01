@@ -36,7 +36,7 @@ from pathlib import Path
 import requests
 from math import ceil
 import torch.nn.functional as F
-from pseudotimes import get_trees, get_chain_from_path, get_flow, get_path_from_root, get_edge_info
+from pseudotimes import get_trees, get_chain_from_path, get_flow, get_path_from_root, get_edge_info, get_time
 
 def setup_experiment():
     """Set up experiment directories and logging"""
@@ -72,7 +72,7 @@ def set_seed(seed=42):
 def setup_model(x, adj, logger):
     set_seed()
     """Initialize models, vector field and optimizer"""
-    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0))
+    model = DirectedDiffPool(num_features=x.size(1), max_nodes=x.size(0), cluster_ratio=0.05)#try 0.06 if fails
     
     # # Get vector field size based on initial model output
     # with torch.no_grad():
@@ -220,7 +220,7 @@ def train_model(model, vf, optimizer, x, adj, adata_subsampled, epochs, run_dir,
 
         λ_lap = 100
         # λent = 1
-        λvf = 100
+        λvf = 0
         # λvar = 1
         L = L_emb + λ_lap*L_laplacian -λvf * L_vf
         print(L)
@@ -433,7 +433,7 @@ def visualize_final_model_with_trees(model, vf, x, adj, run_dir, logger, trees):
     logger.info("Creating vector field visualizations...")
     
     # Generate final model output for visualization
-    probs = [tree[0].detach().numpy() for tree in trees]
+    probs = [tree[0] for tree in trees]
     print(probs)
     idx = np.argmax(probs)
     prob, tree = trees[idx]
@@ -708,7 +708,7 @@ def main():
     
     logger.info(f"Training completed. Results saved to {run_dir}")
 
-    alphas = [0.001, 0.01, 0.1, 1, 10, 100, 1000]
+    alphas = [1]
 
     # PSEUDOTIME
 
@@ -728,19 +728,20 @@ def main():
     #get pseudotimes
     x_out, A = model(x, adj)
     node_embeddings = model.compute_node_embeddings(x, adj, full_hierarchy=True)
-    P = model.cluster_matrix(x, adj)
+    P = model.cluster_matrix(x, adj).detach().numpy()
     trees = get_trees(A, P, root_cell)
 
     
-    flows = torch.zeros(node_embeddings.shape[0])
     edge_flows, edge_map = get_edge_info(x_out, A, vf)
-    for i in range(node_embeddings.shape[0]):
-        flow = get_flow(trees, i, P, x_out, vf, edge_flows, edge_map)
-        flows[i] = flow
+    distances = torch.sum((node_embeddings - node_embeddings[root_cell]) ** 2, dim=1).detach().numpy()
 
-    distances = torch.sum((node_embeddings - node_embeddings[root_cell]) ** 2, dim=1)
     for alpha in alphas:
-        pseudotimes = distances * torch.exp(-alpha*flows)
+        pseudotimes = torch.zeros(node_embeddings.shape[0])
+        for i in range(node_embeddings.shape[0]):
+            time = get_time(trees, i, P, x_out, vf, edge_flows, edge_map, distances[i], alpha)
+            pseudotimes[i] = time
+
+        
 
         # plt.close("all")  
         # plt.figure(1, (10, 6))
@@ -768,7 +769,7 @@ def main():
 
         plt.close("all")
         plt.figure(1, (10, 6))
-        plt.title(f"Pseudotime_alpha_{alpha}")
+        plt.title(f"Pseudotime: $\\alpha$ = {alpha}")
 
         plt.scatter(
             umap[mask, 0],
@@ -788,6 +789,22 @@ def main():
 
         # Visualize final model
     x_out_final, chain_final = visualize_final_model_with_trees(model, vf, x, adj, run_dir, logger, trees)
+
+    # Plot histogram of flow values
+    plt.close("all")
+    plt.figure(figsize=(10, 6))
+    plt.hist(flows.detach().numpy(), bins=50, edgecolor='black', color='steelblue', alpha=0.7)
+    plt.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Zero flow')
+    plt.xlabel('Flow Value')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Flow Factors Across Cells')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    save_path = os.path.join(run_dir, 'flow_histogram.png')
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    logger.info(f"Flow histogram saved to {save_path}")
+    logger.info(f"Flow stats: mean={flows.mean():.4f}, std={flows.std():.4f}, min={flows.min():.4f}, max={flows.max():.4f}")
 
 def download_bone_marrow_dataset():
     DATA_DIR = Path("data")

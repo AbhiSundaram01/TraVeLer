@@ -44,7 +44,7 @@ def get_chain_from_path(path, x_out):
 
 def get_edge_info(x_out, adj_out, vf):
     chain, _ = get_all_edges(x_out, adj_out)
-    edge_flows = generate_integration_matrix(vf, chain)
+    edge_flows = generate_integration_matrix(vf, chain).detach()
     edge_list = [(i, j) for i in range(adj_out.shape[0]) for j in range(adj_out.shape[1]) if i != j]
     edge_map = { (i, j): idx for idx, (i, j) in enumerate(edge_list) }
     return edge_flows, edge_map
@@ -71,9 +71,30 @@ def get_flow(trees, target_cell, P, x_out, vf, edge_flows, edge_map):
             flow_over_paths += flow * cluster_prob
         flow_over_trees += flow_over_paths * prob
     return flow_over_trees
+
+def get_time(trees, target_cell, P, x_out, vf, edge_flows, edge_map, d,alpha):
+    time = 0
+    for prob, tree in trees:
+        time_over_paths = 0.0
+        for target, cluster_prob in enumerate(P[target_cell, :]):
+            root = [n for n in tree.nodes if tree.in_degree(n) == 0]
+            root = root[0]
+            if root == target:
+                time_over_paths += d * cluster_prob
+                continue
+            path = get_path_from_root(tree, root, target)
+            flow = 0
+            counter = 0  
+            for i in range(len(path)-1):
+                u, v = path[i], path[i+1]
+                edge_idx = edge_map[(u, v)]
+                flow += edge_flows[edge_idx]
+                counter +=1
+            if counter != 0:
+                flow = flow / counter
+            time_over_paths += d *np.exp(-alpha*flow) * cluster_prob
+        time += time_over_paths * prob
+    return time
     
-
-
-
 
 
